@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod opencode;
 
 use crate::event::AgentEventKind;
@@ -26,7 +27,7 @@ pub(crate) fn json_value_or_null(val: &serde_json::Value, key: &str) -> serde_js
 /// from a single source of truth. The `kind` field is a compile-time enum,
 /// not a string, so typos cannot creep in. Drift between the table and the
 /// adapter's `parse()` match arms is caught by the tests in `claude.rs` /
-/// `codex.rs` via [`assert_table_drift_free`].
+/// `codex.rs` / `cursor.rs` via [`assert_table_drift_free`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistration {
     /// Trigger name in the agent's settings.json (e.g. `"SessionStart"`,

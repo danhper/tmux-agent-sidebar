@@ -1,4 +1,4 @@
-use crate::tmux::{CLAUDE_AGENT, CODEX_AGENT};
+use crate::tmux::{CLAUDE_AGENT, CODEX_AGENT, CURSOR_AGENT};
 
 /// Build the ready-to-paste LLM prompt for the given agent name.
 ///
@@ -15,6 +15,8 @@ use crate::tmux::{CLAUDE_AGENT, CODEX_AGENT};
 ///   has no plugin mechanism upstream. This branch genuinely needs the
 ///   running executable path, so it returns `None` if `current_exe()`
 ///   cannot be resolved.
+/// - **Cursor**: same `setup cursor` flow, targeting `~/.cursor/hooks.json`
+///   (Cursor's own `{"version": 1, "hooks": {...}}` format).
 ///
 /// Returns `None` for unknown agents.
 pub(crate) fn prompt_for_agent(agent: &str) -> Option<String> {
@@ -39,6 +41,18 @@ pub(crate) fn prompt_for_agent(agent: &str) -> Option<String> {
                  Add these hooks to ~/.codex/hooks.json. If hooks already \
                  exist, merge them without making destructive changes. Restart \
                  Codex after changing config.toml so the feature flag takes effect."
+            ))
+        }
+        CURSOR_AGENT => {
+            let exe_path =
+                crate::cli::setup::shell_quote(&std::env::current_exe().ok()?.to_string_lossy());
+            Some(format!(
+                "Run {exe_path} setup cursor. It prints a Cursor hooks.json document \
+                 (top-level \"version\": 1 plus a \"hooks\" object keyed by Cursor \
+                 event name). Merge those entries into ~/.cursor/hooks.json — create \
+                 the file if it does not exist, and if hooks already exist, merge \
+                 them without making destructive changes. Restart cursor-agent so \
+                 the new hooks are picked up."
             ))
         }
         _ => None,
@@ -136,6 +150,24 @@ mod tests {
         assert!(codex.contains("~/.codex/hooks.json"));
         assert!(codex.contains("codex_hooks = true"));
         assert!(codex.contains("Restart Codex"));
+    }
+
+    #[test]
+    fn prompt_for_agent_cursor_targets_cursor_hooks_json() {
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let quoted = crate::cli::setup::shell_quote(&exe);
+        let cursor = prompt_for_agent("cursor").unwrap();
+        assert!(
+            cursor.contains(&format!("Run {quoted} setup cursor")),
+            "cursor prompt missing quoted current_exe path: {cursor}"
+        );
+        assert!(cursor.contains("~/.cursor/hooks.json"));
+        assert!(cursor.contains("\"version\": 1"));
+        assert!(cursor.contains("Restart cursor-agent"));
+        assert!(!cursor.contains("codex"));
     }
 
     #[test]

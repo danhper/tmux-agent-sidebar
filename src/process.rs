@@ -89,11 +89,10 @@ impl ProcessSnapshot {
     }
 
     pub(crate) fn tree_has_agent(&self, seed_pids: &[u32], agent: &AgentType) -> bool {
-        let agent_name = agent.as_str();
         self.descendants(seed_pids).into_iter().any(|pid| {
             self.info_by_pid
                 .get(&pid)
-                .map(|info| process_matches_agent(info, agent_name))
+                .map(|info| process_is_agent(info, agent))
                 .unwrap_or(false)
         })
     }
@@ -118,6 +117,15 @@ pub(crate) fn command_basename(command: &str) -> &str {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(command)
+}
+
+/// Whether `info` is a live process of `agent`, checking every executable
+/// name the agent is known to run under (see [`AgentType::process_names`]).
+pub(crate) fn process_is_agent(info: &ProcessInfo, agent: &AgentType) -> bool {
+    agent
+        .process_names()
+        .iter()
+        .any(|name| process_matches_agent(info, name))
 }
 
 pub(crate) fn process_matches_agent(info: &ProcessInfo, agent_name: &str) -> bool {
@@ -169,6 +177,24 @@ mod tests {
 
         assert!(snapshot.tree_has_agent(&[100], &AgentType::OpenCode));
         assert!(!snapshot.tree_has_agent(&[100], &AgentType::Codex));
+    }
+
+    #[test]
+    fn tree_has_agent_matches_cursor_cli_by_argv0_not_comm() {
+        // Real `ps` line from cursor-agent 2026.08.25: the wrapper script
+        // re-execs the bundled Node binary, so `comm` is the thread name
+        // while argv[0] keeps the `cursor-agent` name.
+        let snapshot = ProcessSnapshot::from_ps_output(
+            "100 1 fish fish\n101 100 MainThread /bin/cursor-agent --use-system-ca /opt/cursor-agent/index.js --trust\n",
+        );
+        assert!(snapshot.tree_has_agent(&[100], &AgentType::Cursor));
+        assert!(!snapshot.tree_has_agent(&[100], &AgentType::Claude));
+
+        // Current installer names the binary plain `agent`.
+        let snapshot = ProcessSnapshot::from_ps_output(
+            "100 1 zsh zsh\n101 100 MainThread /home/u/.local/bin/agent --use-system-ca /x/index.js\n",
+        );
+        assert!(snapshot.tree_has_agent(&[100], &AgentType::Cursor));
     }
 
     #[test]

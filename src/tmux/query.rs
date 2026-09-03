@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::process::{ProcessSnapshot, command_basename};
+use crate::process::{ProcessSnapshot, process_is_agent};
 
 use super::commands::run_tmux;
 use super::options::{
@@ -11,8 +11,7 @@ use super::options::{
     PANE_WORKTREE_BRANCH, PANE_WORKTREE_NAME, unset_pane_option,
 };
 use super::types::{
-    AgentType, CODEX_AGENT, PaneInfo, PaneStatus, PermissionMode, SessionInfo, WindowInfo,
-    WorktreeMetadata,
+    AgentType, PaneInfo, PaneStatus, PermissionMode, SessionInfo, WindowInfo, WorktreeMetadata,
 };
 use crate::worktree::SPAWNED_OPTION;
 
@@ -107,7 +106,7 @@ type SessionMap = indexmap::IndexMap<String, indexmap::IndexMap<String, WindowIn
 
 /// (window_id, pane_index_in_window, pane_pid) — the minimum info needed to
 /// later retarget a permission-mode update at the right pane.
-type CodexPidEntry = (String, usize, u32);
+type ProcessPidEntry = (String, usize, u32);
 
 /// Query all sessions, windows, and panes in a single `tmux list-panes -a` call
 /// (plus one optional `ps` call for process-backed agent checks), instead of
@@ -125,25 +124,26 @@ pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Optio
     };
 
     let process_snapshot = process_snapshot_for_panes(&all_panes_output);
-    let (mut sessions_map, codex_pids) =
+    let (mut sessions_map, process_pids) =
         build_session_hierarchy(&all_panes_output, process_snapshot.as_ref());
-    if !codex_pids.is_empty()
+    if !process_pids.is_empty()
         && let Some(snapshot) = &process_snapshot
     {
-        resolve_codex_permission_modes(&mut sessions_map, &codex_pids, snapshot);
+        resolve_process_permission_modes(&mut sessions_map, &process_pids, snapshot);
     }
     (finalize_sessions(sessions_map), process_snapshot)
 }
 
 /// Parse the raw `tmux list-panes` output into an indexed session→window→pane
-/// hierarchy. Also returns every Codex pane's pid so the caller can resolve
-/// permission modes in a single `ps` pass.
+/// hierarchy. Also returns the pid of every pane whose agent infers its
+/// permission mode from process arguments (Codex, Cursor) so the caller can
+/// resolve those modes in a single `ps` pass.
 fn build_session_hierarchy(
     all_panes_output: &str,
     process_snapshot: Option<&ProcessSnapshot>,
-) -> (SessionMap, Vec<CodexPidEntry>) {
+) -> (SessionMap, Vec<ProcessPidEntry>) {
     let mut sessions_map: SessionMap = indexmap::IndexMap::new();
-    let mut codex_pids: Vec<CodexPidEntry> = Vec::new();
+    let mut process_pids: Vec<ProcessPidEntry> = Vec::new();
     let mut seen_pids: HashSet<u32> = HashSet::new();
 
     for line in all_panes_output.lines() {
@@ -184,28 +184,29 @@ fn build_session_hierarchy(
             });
 
         if let Some(pane) = parse_pane_fields_with_processes(pane_fields, process_snapshot) {
-            if pane.agent == AgentType::Codex
+            if pane.agent.infers_permission_mode_from_process()
                 && let Some(pid) = pane.pane_pid
             {
-                codex_pids.push((window_id.to_string(), window.panes.len(), pid));
+                process_pids.push((window_id.to_string(), window.panes.len(), pid));
             }
             window.panes.push(pane);
         }
     }
 
-    (sessions_map, codex_pids)
+    (sessions_map, process_pids)
 }
 
-/// Fan out Codex permission mode updates to every Codex pane across every
-/// window using the same single process snapshot used for shell-fallback checks.
-fn resolve_codex_permission_modes(
+/// Fan out process-derived permission mode updates (Codex, Cursor) to every
+/// matching pane across every window using the same single process snapshot
+/// used for shell-fallback checks.
+fn resolve_process_permission_modes(
     sessions_map: &mut SessionMap,
-    codex_pids: &[CodexPidEntry],
+    process_pids: &[ProcessPidEntry],
     process_snapshot: &ProcessSnapshot,
 ) {
     for windows in sessions_map.values_mut() {
         for (window_id, window) in windows.iter_mut() {
-            let window_pids: Vec<(usize, u32)> = codex_pids
+            let window_pids: Vec<(usize, u32)> = process_pids
                 .iter()
                 .filter(|(wid, _, _)| wid == window_id)
                 .map(|(_, idx, pid)| (*idx, *pid))
@@ -213,7 +214,7 @@ fn resolve_codex_permission_modes(
             if window_pids.is_empty() {
                 continue;
             }
-            apply_codex_permission_modes(&mut window.panes, &window_pids, process_snapshot);
+            apply_process_permission_modes(&mut window.panes, &window_pids, process_snapshot);
         }
     }
 }
@@ -267,17 +268,17 @@ fn parse_pane_fields_with_processes(
     let current_command = parts[pane_line_field::PANE_CURRENT_COMMAND].as_str();
     let pane_pid: Option<u32> = parts[pane_line_field::PANE_PID].parse().ok();
 
-    // Codex / OpenCode panes can leave stale tmux metadata behind after the
-    // agent exits and the pane falls back to the user's shell. Neither
-    // agent exposes a reliable "process exit" hook (Codex has no such
-    // hook, OpenCode runs under Bun where `process.on("exit")` does not
-    // fire our handlers), so the Rust polling side must own teardown:
-    // wipe pane options + activity log the first poll after the agent
-    // is gone. Subsequent polls short-circuit at the `AgentType::from_label`
-    // check above once `@pane_agent` has been cleared. Claude is excluded
-    // because its SessionEnd hook drives cleanup instead.
-    if matches!(agent, AgentType::Codex | AgentType::OpenCode) && is_shell_command(current_command)
-    {
+    // Codex / OpenCode / Cursor panes can leave stale tmux metadata behind
+    // after the agent exits and the pane falls back to the user's shell.
+    // None of them exposes a reliable "process exit" hook (Codex has no
+    // such hook, OpenCode runs under Bun where `process.on("exit")` does
+    // not fire our handlers, Cursor's `sessionEnd` only fires on a clean
+    // exit), so the Rust polling side must own teardown: wipe pane options
+    // + activity log the first poll after the agent is gone. Subsequent
+    // polls short-circuit at the `AgentType::from_label` check above once
+    // `@pane_agent` has been cleared. Claude is excluded because its
+    // SessionEnd hook drives cleanup instead.
+    if agent.swept_on_shell_fallback() && is_shell_command(current_command) {
         let agent_still_alive = pane_pid
             .and_then(|pid| {
                 process_snapshot.map(|snapshot| snapshot.tree_has_agent(&[pid], &agent))
@@ -298,7 +299,8 @@ fn parse_pane_fields_with_processes(
     };
 
     // Claude: read permission_mode from hook-set tmux variable.
-    // Codex / OpenCode: no permission_mode in hooks, keep the default.
+    // Codex / OpenCode / Cursor: no permission_mode in hooks, keep the
+    // default (Codex and Cursor are refined from process args below).
     let permission_mode = if agent == AgentType::Claude {
         PermissionMode::from_label(&parts[pane_line_field::PERMISSION_MODE])
     } else {
@@ -351,9 +353,9 @@ fn parse_pane_fields_with_processes(
 }
 
 /// Wipe all agent-tracked tmux pane options and the activity log file for
-/// `pane_id`. Triggered by `parse_pane_fields` when it detects a Codex or
-/// OpenCode pane that has dropped back to the user's shell, since neither
-/// CLI fires a reliable process-exit hook. Claude panes are never routed
+/// `pane_id`. Triggered by `parse_pane_fields` when it detects a Codex,
+/// OpenCode, or Cursor pane that has dropped back to the user's shell,
+/// since none of those CLIs fires a reliable process-exit hook. Claude panes are never routed
 /// here because Claude has its own SessionEnd hook. The set of keys
 /// mirrors `clear_all_meta` + `clear_run_state` + status/attention clears
 /// in `src/cli/hook/context.rs`; keep them in sync when a new `@pane_*`
@@ -430,6 +432,34 @@ fn detect_codex_permission_mode(args: &str) -> PermissionMode {
     PermissionMode::Default
 }
 
+/// Detect the Cursor CLI permission mode from process args. `cursor-agent`
+/// has no hook-visible mode, so the badge mirrors its launch flags:
+/// `-f` / `--force` / `--yolo` run everything (`!`), `--auto-review` lets
+/// a classifier approve safe calls (`auto`), and `--plan` / `--mode plan`
+/// is read-only planning (`plan`). Token-based so `--force` does not
+/// match an unrelated `--force-*` flag.
+fn detect_cursor_permission_mode(args: &str) -> PermissionMode {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens
+        .iter()
+        .any(|t| matches!(*t, "-f" | "--force" | "--yolo"))
+    {
+        return PermissionMode::BypassPermissions;
+    }
+    if tokens.contains(&"--auto-review") {
+        return PermissionMode::Auto;
+    }
+    let plan_mode = tokens.iter().enumerate().any(|(i, t)| {
+        *t == "--plan"
+            || *t == "--mode=plan"
+            || (*t == "--mode" && tokens.get(i + 1) == Some(&"plan"))
+    });
+    if plan_mode {
+        return PermissionMode::Plan;
+    }
+    PermissionMode::Default
+}
+
 fn process_snapshot_for_panes(all_panes_output: &str) -> Option<ProcessSnapshot> {
     if !pane_output_needs_process_snapshot(all_panes_output) {
         return None;
@@ -444,30 +474,41 @@ fn pane_output_needs_process_snapshot(all_panes_output: &str) -> bool {
             return false;
         }
         let pane_fields = &parts[session_line_field::PANE_LINE_OFFSET..];
-        AgentType::from_label(&pane_fields[pane_line_field::AGENT])
-            .is_some_and(|agent| matches!(agent, AgentType::Codex | AgentType::OpenCode))
+        AgentType::from_label(&pane_fields[pane_line_field::AGENT]).is_some_and(|agent| {
+            agent.swept_on_shell_fallback() || agent.infers_permission_mode_from_process()
+        })
     })
 }
 
-fn apply_codex_permission_modes(
+fn detect_process_permission_mode(agent: &AgentType, args: &str) -> PermissionMode {
+    match agent {
+        AgentType::Codex => detect_codex_permission_mode(args),
+        AgentType::Cursor => detect_cursor_permission_mode(args),
+        _ => PermissionMode::Default,
+    }
+}
+
+fn apply_process_permission_modes(
     panes: &mut [PaneInfo],
     pids_to_check: &[(usize, u32)],
     process_snapshot: &ProcessSnapshot,
 ) {
     for (idx, pid) in pids_to_check {
+        let Some(pane) = panes.get_mut(*idx) else {
+            continue;
+        };
+        let agent = pane.agent.clone();
         let descendants = process_snapshot.descendants(&[*pid]);
         for descendant in descendants {
             let Some(info) = process_snapshot.info_by_pid.get(&descendant) else {
                 continue;
             };
-            if command_basename(&info.comm) != CODEX_AGENT {
+            if !process_is_agent(info, &agent) {
                 continue;
             }
-            if let Some(pane) = panes.get_mut(*idx) {
-                pane.permission_mode = detect_codex_permission_mode(&info.args);
-                if pane.permission_mode != PermissionMode::Default {
-                    break;
-                }
+            pane.permission_mode = detect_process_permission_mode(&agent, &info.args);
+            if pane.permission_mode != PermissionMode::Default {
+                break;
             }
         }
     }
@@ -582,13 +623,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detect_cursor_permission_mode_variants() {
+        let base = "/bin/cursor-agent --use-system-ca /opt/cursor-agent/index.js";
+        assert_eq!(detect_cursor_permission_mode(base), PermissionMode::Default);
+        assert_eq!(
+            detect_cursor_permission_mode(&format!("{base} --trust")),
+            PermissionMode::Default
+        );
+        for flag in ["--force", "-f", "--yolo"] {
+            assert_eq!(
+                detect_cursor_permission_mode(&format!("{base} {flag}")),
+                PermissionMode::BypassPermissions,
+                "{flag}"
+            );
+        }
+        assert_eq!(
+            detect_cursor_permission_mode(&format!("{base} --auto-review")),
+            PermissionMode::Auto
+        );
+        for flag in ["--plan", "--mode plan", "--mode=plan"] {
+            assert_eq!(
+                detect_cursor_permission_mode(&format!("{base} {flag}")),
+                PermissionMode::Plan,
+                "{flag}"
+            );
+        }
+        // Force wins over plan, and a look-alike flag must not match.
+        assert_eq!(
+            detect_cursor_permission_mode(&format!("{base} --plan --force")),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(
+            detect_cursor_permission_mode(&format!("{base} --force-color --mode ask")),
+            PermissionMode::Default
+        );
+    }
+
     fn test_pane_codex(id: &str) -> PaneInfo {
+        test_pane_for(id, AgentType::Codex)
+    }
+
+    fn test_pane_for(id: &str, agent: AgentType) -> PaneInfo {
         PaneInfo {
             pane_id: id.into(),
             pane_active: false,
             status: PaneStatus::Idle,
             attention: false,
-            agent: AgentType::Codex,
+            agent,
             path: "/tmp".into(),
             current_command: String::new(),
             prompt: String::new(),
@@ -607,36 +689,68 @@ mod tests {
     }
 
     #[test]
-    fn apply_codex_permission_modes_from_ps() {
+    fn apply_process_permission_modes_from_ps() {
         let mut panes = vec![test_pane_codex("%1")];
         let pids = vec![(0, 101)];
         let ps_out = "101 1 bash /bin/bash\n102 101 codex /bin/codex --full-auto\n";
         let snapshot = ProcessSnapshot::from_ps_output(ps_out);
 
-        apply_codex_permission_modes(&mut panes, &pids, &snapshot);
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
         assert_eq!(panes[0].permission_mode, PermissionMode::Auto);
     }
 
     #[test]
-    fn apply_codex_permission_modes_follows_shell_wrappers() {
+    fn apply_process_permission_modes_follows_shell_wrappers() {
         let mut panes = vec![test_pane_codex("%1")];
         let pids = vec![(0, 101)];
         let ps_out = "101 1 bash /bin/bash\n102 101 sh -c wrapper\n103 102 codex /usr/local/bin/codex --yolo\n";
         let snapshot = ProcessSnapshot::from_ps_output(ps_out);
 
-        apply_codex_permission_modes(&mut panes, &pids, &snapshot);
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
         assert_eq!(panes[0].permission_mode, PermissionMode::BypassPermissions);
     }
 
     #[test]
-    fn apply_codex_permission_modes_matches_path_comm() {
+    fn apply_process_permission_modes_matches_path_comm() {
         let mut panes = vec![test_pane_codex("%1")];
         let pids = vec![(0, 101)];
         let ps_out = "101 1 /bin/zsh /bin/zsh\n102 101 /opt/homebrew/bin/codex /opt/homebrew/bin/codex --full-auto\n";
         let snapshot = ProcessSnapshot::from_ps_output(ps_out);
 
-        apply_codex_permission_modes(&mut panes, &pids, &snapshot);
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
         assert_eq!(panes[0].permission_mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn apply_process_permission_modes_reads_cursor_flags_from_argv() {
+        // cursor-agent's `comm` is the Node thread name, so the match has
+        // to go through argv[0]; the user's flags trail the bundled
+        // `index.js` path.
+        let mut panes = vec![test_pane_for("%1", AgentType::Cursor)];
+        let pids = vec![(0, 101)];
+        let ps_out = "101 1 fish fish\n102 101 MainThread /bin/cursor-agent --use-system-ca /opt/cursor-agent/index.js --force\n";
+        let snapshot = ProcessSnapshot::from_ps_output(ps_out);
+
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
+        assert_eq!(panes[0].permission_mode, PermissionMode::BypassPermissions);
+
+        let mut panes = vec![test_pane_for("%1", AgentType::Cursor)];
+        let ps_out = "101 1 zsh zsh\n102 101 MainThread /home/u/.local/bin/agent --use-system-ca /x/index.js --plan\n";
+        let snapshot = ProcessSnapshot::from_ps_output(ps_out);
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
+        assert_eq!(panes[0].permission_mode, PermissionMode::Plan);
+    }
+
+    #[test]
+    fn apply_process_permission_modes_ignores_other_agents_processes() {
+        // A Codex pane must not pick up flags from a cursor-agent child
+        // and vice versa.
+        let mut panes = vec![test_pane_codex("%1")];
+        let pids = vec![(0, 101)];
+        let ps_out = "101 1 bash /bin/bash\n102 101 MainThread /bin/cursor-agent --use-system-ca /x/index.js --force\n";
+        let snapshot = ProcessSnapshot::from_ps_output(ps_out);
+        apply_process_permission_modes(&mut panes, &pids, &snapshot);
+        assert_eq!(panes[0].permission_mode, PermissionMode::Default);
     }
 
     #[test]

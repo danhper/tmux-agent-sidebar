@@ -75,6 +75,7 @@ setup() {
     ln -sf /bin/sleep "$FAKE_BIN_DIR/claude"
     ln -sf /bin/sleep "$FAKE_BIN_DIR/codex"
     ln -sf /bin/sleep "$FAKE_BIN_DIR/opencode"
+    ln -sf /bin/sleep "$FAKE_BIN_DIR/cursor-agent"
     export FAKE_BIN_DIR
 }
 

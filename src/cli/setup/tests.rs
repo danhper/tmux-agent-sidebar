@@ -195,6 +195,85 @@ fn snippet_codex_non_session_start_has_empty_matcher() {
 }
 
 #[test]
+fn snippet_cursor_uses_cursor_hooks_json_shape() {
+    // Cursor's hooks.json differs from Claude/Codex settings.json: entries
+    // carry `command` inline and the document needs `"version": 1`.
+    let v = build_agent_snippet("cursor", FAKE_HOOK).unwrap();
+    assert_eq!(v.get("version"), Some(&json!(1)));
+    let hooks = v.get("hooks").and_then(Value::as_object).unwrap();
+    let mut expected_triggers: Vec<&str> = CursorAdapter::HOOK_REGISTRATIONS
+        .iter()
+        .map(|r| r.trigger)
+        .collect();
+    expected_triggers.sort();
+    expected_triggers.dedup();
+    let mut actual_triggers: Vec<&str> = hooks.keys().map(String::as_str).collect();
+    actual_triggers.sort();
+    assert_eq!(actual_triggers, expected_triggers);
+
+    let entry = v
+        .pointer("/hooks/sessionStart/0")
+        .expect("cursor sessionStart entry");
+    assert_eq!(
+        entry,
+        &json!({ "command": "bash /fake/hook.sh cursor session-start" }),
+        "cursor entries carry the command inline with no matcher / type"
+    );
+    // Both `stop` and `afterAgentResponse` route to the internal `stop` event.
+    assert_eq!(
+        v.pointer("/hooks/afterAgentResponse/0/command")
+            .and_then(Value::as_str),
+        Some("bash /fake/hook.sh cursor stop")
+    );
+    assert_eq!(
+        v.pointer("/hooks/stop/0/command").and_then(Value::as_str),
+        Some("bash /fake/hook.sh cursor stop")
+    );
+}
+
+#[test]
+fn missing_hooks_understands_cursor_hooks_json_shape() {
+    let config = build_agent_snippet("cursor", FAKE_HOOK).unwrap();
+    assert!(missing_hooks("cursor", &config, FAKE_HOOK).is_empty());
+
+    // An empty / absent config flags every trigger (reported in the
+    // snippet's key order, which is alphabetical).
+    let mut all_missing = missing_hooks("cursor", &Value::Null, FAKE_HOOK);
+    all_missing.sort();
+    let mut expected: Vec<String> = CursorAdapter::HOOK_REGISTRATIONS
+        .iter()
+        .map(|r| r.trigger.to_string())
+        .collect();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(all_missing, expected);
+
+    // Dropping one trigger reports just that trigger.
+    let mut config = build_agent_snippet("cursor", FAKE_HOOK).unwrap();
+    config
+        .get_mut("hooks")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .remove("beforeSubmitPrompt");
+    assert_eq!(
+        missing_hooks("cursor", &config, FAKE_HOOK),
+        vec!["beforeSubmitPrompt".to_string()]
+    );
+
+    // A `prompt`-type Cursor hook with a matching command does not count.
+    let mut config = build_agent_snippet("cursor", FAKE_HOOK).unwrap();
+    config
+        .pointer_mut("/hooks/stop/0")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .insert("type".into(), json!("prompt"));
+    assert_eq!(
+        missing_hooks("cursor", &config, FAKE_HOOK),
+        vec!["stop".to_string()]
+    );
+}
+
+#[test]
 fn missing_hooks_is_empty_for_matching_claude_config() {
     let config = build_agent_snippet("claude", FAKE_HOOK).unwrap();
     assert!(missing_hooks("claude", &config, FAKE_HOOK).is_empty());
@@ -457,13 +536,13 @@ fn full_output_has_expected_top_level_keys() {
     let agents = v.get("agents").and_then(Value::as_object).unwrap();
     let mut keys: Vec<&str> = agents.keys().map(String::as_str).collect();
     keys.sort();
-    assert_eq!(keys, vec!["claude", "codex"]);
+    assert_eq!(keys, vec!["claude", "codex", "cursor"]);
 }
 
 #[test]
 fn full_output_snippet_matches_single_agent_snippet() {
     let full = build_setup_output(FAKE_HOOK);
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "cursor"] {
         let from_full = full
             .pointer(&format!("/agents/{}/snippet", agent))
             .unwrap_or_else(|| panic!("missing snippet for {}", agent));
@@ -478,6 +557,7 @@ fn full_output_normalized_hooks_count_matches_table() {
     for (agent, table_len) in [
         ("claude", ClaudeAdapter::HOOK_REGISTRATIONS.len()),
         ("codex", CodexAdapter::HOOK_REGISTRATIONS.len()),
+        ("cursor", CursorAdapter::HOOK_REGISTRATIONS.len()),
     ] {
         let hooks = full
             .pointer(&format!("/agents/{}/hooks", agent))
@@ -522,6 +602,11 @@ fn full_output_config_paths() {
             .and_then(Value::as_str),
         Some("~/.codex/hooks.json")
     );
+    assert_eq!(
+        full.pointer("/agents/cursor/config_path")
+            .and_then(Value::as_str),
+        Some("~/.cursor/hooks.json")
+    );
 }
 
 #[test]
@@ -549,6 +634,20 @@ fn run_setup_codex_returns_only_snippet() {
     let v = json.unwrap();
     assert!(v.get("hooks").is_some());
     assert!(v.get("version").is_none());
+}
+
+#[test]
+fn run_setup_cursor_returns_only_snippet() {
+    let (code, json) = run_setup(&["cursor".to_string()], FAKE_HOOK);
+    assert_eq!(code, 0);
+    let v = json.unwrap();
+    assert!(v.get("hooks").is_some());
+    assert_eq!(
+        v.get("version"),
+        Some(&json!(1)),
+        "Cursor hooks.json requires version 1"
+    );
+    assert!(v.get("hook_script").is_none());
 }
 
 #[test]
@@ -906,6 +1005,82 @@ const EXPECTED_FULL_OUTPUT: &str = r#"{
           ]
         }
       }
+    },
+    "cursor": {
+      "config_path": "~/.cursor/hooks.json",
+      "hooks": [
+        {
+          "command": "bash /fake/hook.sh cursor session-start",
+          "event": "session-start",
+          "matcher": null,
+          "trigger": "sessionStart"
+        },
+        {
+          "command": "bash /fake/hook.sh cursor session-end",
+          "event": "session-end",
+          "matcher": null,
+          "trigger": "sessionEnd"
+        },
+        {
+          "command": "bash /fake/hook.sh cursor user-prompt-submit",
+          "event": "user-prompt-submit",
+          "matcher": null,
+          "trigger": "beforeSubmitPrompt"
+        },
+        {
+          "command": "bash /fake/hook.sh cursor stop",
+          "event": "stop",
+          "matcher": null,
+          "trigger": "stop"
+        },
+        {
+          "command": "bash /fake/hook.sh cursor stop",
+          "event": "stop",
+          "matcher": null,
+          "trigger": "afterAgentResponse"
+        },
+        {
+          "command": "bash /fake/hook.sh cursor activity-log",
+          "event": "activity-log",
+          "matcher": null,
+          "trigger": "postToolUse"
+        }
+      ],
+      "snippet": {
+        "hooks": {
+          "afterAgentResponse": [
+            {
+              "command": "bash /fake/hook.sh cursor stop"
+            }
+          ],
+          "beforeSubmitPrompt": [
+            {
+              "command": "bash /fake/hook.sh cursor user-prompt-submit"
+            }
+          ],
+          "postToolUse": [
+            {
+              "command": "bash /fake/hook.sh cursor activity-log"
+            }
+          ],
+          "sessionEnd": [
+            {
+              "command": "bash /fake/hook.sh cursor session-end"
+            }
+          ],
+          "sessionStart": [
+            {
+              "command": "bash /fake/hook.sh cursor session-start"
+            }
+          ],
+          "stop": [
+            {
+              "command": "bash /fake/hook.sh cursor stop"
+            }
+          ]
+        },
+        "version": 1
+      }
     }
   },
   "hook_script": "/fake/hook.sh",
@@ -915,7 +1090,7 @@ const EXPECTED_FULL_OUTPUT: &str = r#"{
 #[test]
 fn full_output_normalized_command_matches_snippet_command() {
     let full = build_setup_output(FAKE_HOOK);
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "cursor"] {
         let hooks = full
             .pointer(&format!("/agents/{}/hooks", agent))
             .and_then(Value::as_array)
@@ -928,7 +1103,10 @@ fn full_output_normalized_command_matches_snippet_command() {
                 .and_then(Value::as_array)
                 .unwrap_or_else(|| panic!("snippet missing trigger {} for {}", trigger, agent));
             let found = group.iter().any(|slot: &Value| {
+                // Claude/Codex nest the command under `hooks[]`; Cursor
+                // carries it inline.
                 slot.pointer("/hooks/0/command")
+                    .or_else(|| slot.get("command"))
                     .and_then(Value::as_str)
                     .map(|c| c == command)
                     .unwrap_or(false)

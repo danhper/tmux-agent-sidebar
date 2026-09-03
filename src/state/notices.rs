@@ -98,7 +98,9 @@ impl AppState {
     ///
     /// Both Claude and Codex are always evaluated so a user who closes
     /// their last agent pane still sees any outstanding hook setup
-    /// warnings.
+    /// warnings. Cursor is only evaluated when its CLI is installed —
+    /// its `~/.cursor/hooks.json` is shared with the Cursor IDE, so a
+    /// user who never runs `cursor-agent` should not be nagged about it.
     pub fn refresh_notices(&mut self) {
         self.notices.claude_plugin_notice = compute_claude_plugin_notice(
             &self.notices.claude_plugin_status,
@@ -126,13 +128,17 @@ impl AppState {
         // that fallback would flag every custom install as "Missing hooks"
         // — skip the check unless detection succeeded (debug overrides
         // still force the warning so the popup remains testable).
+        let mut agents = vec![
+            crate::tmux::CLAUDE_AGENT.to_string(),
+            crate::tmux::CODEX_AGENT.to_string(),
+        ];
+        if force_missing || cursor_cli_installed() {
+            agents.push(crate::tmux::CURSOR_AGENT.to_string());
+        }
         self.notices.missing_hook_groups = if force_missing || resolved_hook.detected {
             compute_missing_hook_groups(
                 claude_plugin_present,
-                vec![
-                    crate::tmux::CLAUDE_AGENT.to_string(),
-                    crate::tmux::CODEX_AGENT.to_string(),
-                ],
+                agents,
                 &resolved_hook.path,
                 load_config,
             )
@@ -253,6 +259,22 @@ pub(super) fn compute_claude_plugin_notice(
 
 pub(crate) fn debug_forced_display() -> bool {
     cfg!(feature = "debug")
+}
+
+/// Whether the Cursor CLI is reachable on `$PATH`. Only the legacy
+/// `cursor-agent` name is probed: the current installer also ships the
+/// binary as plain `agent`, but that name is far too generic to treat as
+/// evidence that Cursor is installed.
+fn cursor_cli_installed() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        crate::tmux::CURSOR_PROCESS_NAMES
+            .iter()
+            .filter(|name| **name != "agent")
+            .any(|name| dir.join(name).is_file())
+    })
 }
 
 #[cfg(test)]

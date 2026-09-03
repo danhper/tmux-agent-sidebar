@@ -55,6 +55,7 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | `@sidebar_color_agent_claude`   | `174`&nbsp;(terracotta) | Claude brand color   |
 | `@sidebar_color_agent_codex`    | `141`&nbsp;(purple)     | Codex brand color    |
 | `@sidebar_color_agent_opencode` | `117`&nbsp;(light blue) | OpenCode brand color |
+| `@sidebar_color_agent_cursor`   | `250`&nbsp;(silver)     | Cursor brand color   |
 
 ## Text colors
 

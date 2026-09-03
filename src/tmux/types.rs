@@ -1,6 +1,14 @@
 pub const CLAUDE_AGENT: &str = "claude";
 pub const CODEX_AGENT: &str = "codex";
 pub const OPENCODE_AGENT: &str = "opencode";
+pub const CURSOR_AGENT: &str = "cursor";
+
+/// Executable names under which the Cursor CLI shows up in a process
+/// tree. The official installer ships the binary as `cursor-agent`
+/// (older builds) and `agent` (current builds); the wrapper script
+/// re-execs itself so `args[0]` keeps the invoked name while `comm`
+/// becomes the Node thread name (`MainThread`).
+pub const CURSOR_PROCESS_NAMES: &[&str] = &["cursor-agent", "agent"];
 
 #[derive(Debug, Clone)]
 pub struct PaneInfo {
@@ -92,6 +100,7 @@ pub enum AgentType {
     Claude,
     Codex,
     OpenCode,
+    Cursor,
     #[allow(dead_code)]
     Unknown,
 }
@@ -119,6 +128,7 @@ impl AgentType {
             CLAUDE_AGENT => Some(Self::Claude),
             CODEX_AGENT => Some(Self::Codex),
             OPENCODE_AGENT => Some(Self::OpenCode),
+            CURSOR_AGENT => Some(Self::Cursor),
             _ => None,
         }
     }
@@ -128,12 +138,43 @@ impl AgentType {
             Self::Claude => CLAUDE_AGENT,
             Self::Codex => CODEX_AGENT,
             Self::OpenCode => OPENCODE_AGENT,
+            Self::Cursor => CURSOR_AGENT,
             Self::Unknown => "unknown",
         }
     }
 
     pub fn label(&self) -> &str {
         self.as_str()
+    }
+
+    /// Executable names that identify a live process of this agent in a
+    /// `ps` snapshot (matched against the command basename). Most agents
+    /// run under their own label; Cursor's CLI binary is named
+    /// differently from its sidebar label.
+    pub fn process_names(&self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &[CLAUDE_AGENT],
+            Self::Codex => &[CODEX_AGENT],
+            Self::OpenCode => &[OPENCODE_AGENT],
+            Self::Cursor => CURSOR_PROCESS_NAMES,
+            Self::Unknown => &[],
+        }
+    }
+
+    /// Agents whose hooks cannot be relied on to tear the pane down when
+    /// the process exits, so the TUI polling side must sweep stale pane
+    /// state once the pane has fallen back to a shell. Claude's
+    /// `SessionEnd` owns cleanup and is excluded; Cursor does fire
+    /// `sessionEnd`, but only on a clean exit, so it stays in the sweep
+    /// as a safety net.
+    pub fn swept_on_shell_fallback(&self) -> bool {
+        matches!(self, Self::Codex | Self::OpenCode | Self::Cursor)
+    }
+
+    /// Agents that expose no permission mode in their hook payloads, so
+    /// the sidebar infers the badge from the running process arguments.
+    pub fn infers_permission_mode_from_process(&self) -> bool {
+        matches!(self, Self::Codex | Self::Cursor)
     }
 }
 
@@ -200,6 +241,8 @@ mod tests {
         assert_eq!(AgentType::from_label("claude"), Some(AgentType::Claude));
         assert_eq!(AgentType::from_label("codex"), Some(AgentType::Codex));
         assert_eq!(AgentType::from_label("opencode"), Some(AgentType::OpenCode));
+        assert_eq!(AgentType::from_label("cursor"), Some(AgentType::Cursor));
+        assert_eq!(AgentType::from_label("cursor-agent"), None);
         assert_eq!(AgentType::from_label("unknown"), None);
         assert_eq!(AgentType::from_label(""), None);
     }
@@ -209,6 +252,7 @@ mod tests {
         assert_eq!(AgentType::Claude.label(), "claude");
         assert_eq!(AgentType::Codex.label(), "codex");
         assert_eq!(AgentType::OpenCode.label(), "opencode");
+        assert_eq!(AgentType::Cursor.label(), "cursor");
         assert_eq!(AgentType::Unknown.label(), "unknown");
     }
 
@@ -217,6 +261,32 @@ mod tests {
         assert_eq!(AgentType::Claude.as_str(), CLAUDE_AGENT);
         assert_eq!(AgentType::Codex.as_str(), CODEX_AGENT);
         assert_eq!(AgentType::OpenCode.as_str(), OPENCODE_AGENT);
+        assert_eq!(AgentType::Cursor.as_str(), CURSOR_AGENT);
+    }
+
+    #[test]
+    fn agent_type_process_names() {
+        assert_eq!(AgentType::Claude.process_names(), &["claude"]);
+        assert_eq!(AgentType::Codex.process_names(), &["codex"]);
+        assert_eq!(AgentType::OpenCode.process_names(), &["opencode"]);
+        assert_eq!(
+            AgentType::Cursor.process_names(),
+            &["cursor-agent", "agent"]
+        );
+        assert!(AgentType::Unknown.process_names().is_empty());
+    }
+
+    #[test]
+    fn agent_type_polling_traits() {
+        assert!(!AgentType::Claude.swept_on_shell_fallback());
+        assert!(AgentType::Codex.swept_on_shell_fallback());
+        assert!(AgentType::OpenCode.swept_on_shell_fallback());
+        assert!(AgentType::Cursor.swept_on_shell_fallback());
+
+        assert!(!AgentType::Claude.infers_permission_mode_from_process());
+        assert!(AgentType::Codex.infers_permission_mode_from_process());
+        assert!(!AgentType::OpenCode.infers_permission_mode_from_process());
+        assert!(AgentType::Cursor.infers_permission_mode_from_process());
     }
 
     #[test]
