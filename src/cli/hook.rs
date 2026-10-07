@@ -1,6 +1,6 @@
 use crate::adapter::cursor::is_cursor_payload;
 use crate::event::{AgentEvent, resolve_adapter};
-use crate::tmux::CURSOR_AGENT;
+use crate::tmux::{CLAUDE_AGENT, CURSOR_AGENT};
 
 use super::{read_stdin_json, tmux_pane};
 
@@ -38,6 +38,10 @@ pub(crate) fn cmd_hook(args: &[String]) -> i32 {
     let Some(event) = adapter.parse(event_name, &input) else {
         return 0;
     };
+    let environment_kind = std::env::var(CLAUDE_ENVIRONMENT_KIND_ENV).ok();
+    if is_idle_remote_control_start(agent_name, &event, environment_kind.as_deref()) {
+        return 0;
+    }
 
     handle_event(&pane, agent_name, event)
 }
@@ -203,6 +207,26 @@ fn is_replayed_cursor_payload(agent_name: &str, input: &serde_json::Value) -> bo
     agent_name != CURSOR_AGENT && is_cursor_payload(input)
 }
 
+/// Env var Claude Code sets on sessions spawned by `claude remote-control`
+/// (`claude rc`); hooks inherit it from the spawned session.
+const CLAUDE_ENVIRONMENT_KIND_ENV: &str = "CLAUDE_CODE_ENVIRONMENT_KIND";
+
+/// `claude rc` pre-spawns an idle `claude --print --sdk-url ...` session
+/// per pane so claude.ai/code can attach to it instantly, and that child
+/// fires `SessionStart`. Registering the pane on it would list a bare
+/// `claude rc` as an agent. Drop only the `SessionStart`: once someone
+/// actually drives the session remotely, `UserPromptSubmit` / `Stop` /
+/// `Notification` call `set_agent_meta` and the pane shows up as usual.
+fn is_idle_remote_control_start(
+    agent_name: &str,
+    event: &AgentEvent,
+    environment_kind: Option<&str>,
+) -> bool {
+    agent_name == CLAUDE_AGENT
+        && environment_kind == Some("bridge")
+        && matches!(event, AgentEvent::SessionStart { .. })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +250,55 @@ mod tests {
     #[test]
     fn cursor_payload_under_cursor_name_is_kept() {
         assert!(!is_replayed_cursor_payload("cursor", &cursor_payload()));
+    }
+
+    fn claude_event(event_name: &str) -> AgentEvent {
+        let payload = json!({
+            "session_id": "cse_123",
+            "cwd": "/home/user/project",
+            "permission_mode": "default",
+            "prompt": "hi",
+        });
+        resolve_adapter("claude")
+            .unwrap()
+            .parse(event_name, &payload)
+            .expect("claude event parses")
+    }
+
+    #[test]
+    fn remote_control_session_start_is_dropped() {
+        let start = claude_event("session-start");
+        assert!(is_idle_remote_control_start(
+            "claude",
+            &start,
+            Some("bridge")
+        ));
+    }
+
+    #[test]
+    fn remote_control_prompt_is_kept() {
+        let prompt = claude_event("user-prompt-submit");
+        assert!(!is_idle_remote_control_start(
+            "claude",
+            &prompt,
+            Some("bridge")
+        ));
+    }
+
+    #[test]
+    fn local_claude_session_start_is_kept() {
+        let start = claude_event("session-start");
+        assert!(!is_idle_remote_control_start("claude", &start, None));
+        assert!(!is_idle_remote_control_start(
+            "claude",
+            &start,
+            Some("local")
+        ));
+        assert!(!is_idle_remote_control_start(
+            "codex",
+            &start,
+            Some("bridge")
+        ));
     }
 
     #[test]

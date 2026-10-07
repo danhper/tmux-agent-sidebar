@@ -224,4 +224,3 @@ mod tests {
         assert_eq!(command, "/usr/bin/node /tmp/server.js --port 3000");
     }
 }
-
