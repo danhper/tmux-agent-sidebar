@@ -63,7 +63,8 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------ |
 | `@sidebar_color_text_active`   | `255`&nbsp;(white)    | Primary text — active rows, counts, filtered repo label                                          |
 | `@sidebar_color_text_muted`    | `252`&nbsp;(light gray) | Secondary text — tree branches, empty-state messages, inactive bottom tabs, activity log labels |
-| `@sidebar_color_text_inactive` | `244`&nbsp;(mid gray) | Body text of unfocused pane rows — prompt / response, idle hint                                  |
+| `@sidebar_color_text_inactive` | `244`&nbsp;(mid gray) | User prompts and idle hints in unfocused pane rows |
+| `@sidebar_color_response_text` | `244`&nbsp;(mid gray) | Last-message preview text; rendered without dimming |
 | `@sidebar_color_port`          | `246`&nbsp;(light gray) | Port numbers                                                                                   |
 | `@sidebar_color_wait_reason`   | `221`&nbsp;(yellow)   | Wait reason text                                                                                 |
 | `@sidebar_color_response_arrow`| `81`&nbsp;(bright cyan) | Response arrow                                                                                 |

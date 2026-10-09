@@ -58,6 +58,9 @@ pub fn buffer_to_styled_string(buf: &Buffer) -> String {
             if let Color::Indexed(n) = cell.fg {
                 attrs.push(format!("fg:{n}"));
             }
+            if let Color::Rgb(r, g, b) = cell.fg {
+                attrs.push(format!("fg:#{r:02x}{g:02x}{b:02x}"));
+            }
             if let Color::Indexed(n) = cell.bg {
                 attrs.push(format!("bg:{n}"));
             }
@@ -66,6 +69,9 @@ pub fn buffer_to_styled_string(buf: &Buffer) -> String {
             }
             if cell.modifier.contains(Modifier::BOLD) {
                 attrs.push("bold".into());
+            }
+            if cell.modifier.contains(Modifier::DIM) {
+                attrs.push("dim".into());
             }
             if cell.modifier.contains(Modifier::REVERSED) {
                 attrs.push("rev".into());

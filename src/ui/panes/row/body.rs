@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 
@@ -123,14 +123,17 @@ pub(super) fn background_hint_row(ctx: &RowCtx, cmd: &str) -> Line<'static> {
 pub(super) fn prompt_rows(pane: &crate::tmux::PaneInfo, ctx: &RowCtx) -> Vec<Line<'static>> {
     let theme = ctx.theme;
     let is_response = pane.prompt_is_response;
-    let prompt_color = if ctx.active {
+    let prompt_color = if is_response {
+        theme.response_text
+    } else if ctx.active {
         theme.text_active
     } else {
         theme.text_inactive
     };
+    let prompt_style = ctx.apply_bg(Style::default().fg(prompt_color));
     let wrap_width = ctx.inner_width.saturating_sub(2);
     let wrapped = if is_response {
-        wrap_text_char(&pane.prompt, wrap_width, 3)
+        wrap_text_char(&pane.prompt, wrap_width, 2)
     } else {
         wrap_text(&pane.prompt, wrap_width, 3)
     };
@@ -142,15 +145,8 @@ pub(super) fn prompt_rows(pane: &crate::tmux::PaneInfo, ctx: &RowCtx) -> Vec<Lin
             let text_dw = 2 + display_width(wl); // "▷ " width
             out.push(ctx.row_line(
                 vec![
-                    Span::styled(
-                        "▷ ",
-                        ctx.apply_bg(
-                            Style::default()
-                                .fg(arrow_color)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ),
-                    Span::styled(wl.clone(), ctx.apply_bg(Style::default().fg(prompt_color))),
+                    Span::styled("▷ ", ctx.apply_bg(Style::default().fg(arrow_color))),
+                    Span::styled(wl.clone(), prompt_style),
                 ],
                 text_dw,
             ));
@@ -158,13 +154,7 @@ pub(super) fn prompt_rows(pane: &crate::tmux::PaneInfo, ctx: &RowCtx) -> Vec<Lin
             let indent = "  ";
             let text = format!("{}{}", indent, wl);
             let text_dw = display_width(&text);
-            out.push(ctx.row_line(
-                vec![Span::styled(
-                    text,
-                    ctx.apply_bg(Style::default().fg(prompt_color)),
-                )],
-                text_dw,
-            ));
+            out.push(ctx.row_line(vec![Span::styled(text, prompt_style)], text_dw));
         }
     }
     out

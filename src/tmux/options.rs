@@ -112,6 +112,7 @@ pub const SIDEBAR_COLOR_PET_EYE: &str = "@sidebar_color_pet_eye";
 pub const SIDEBAR_COLOR_TEXT_ACTIVE: &str = "@sidebar_color_text_active";
 pub const SIDEBAR_COLOR_TEXT_MUTED: &str = "@sidebar_color_text_muted";
 pub const SIDEBAR_COLOR_TEXT_INACTIVE: &str = "@sidebar_color_text_inactive";
+pub const SIDEBAR_COLOR_RESPONSE_TEXT: &str = "@sidebar_color_response_text";
 pub const SIDEBAR_COLOR_SESSION: &str = "@sidebar_color_session";
 pub const SIDEBAR_COLOR_PORT: &str = "@sidebar_color_port";
 pub const SIDEBAR_COLOR_WAIT_REASON: &str = "@sidebar_color_wait_reason";

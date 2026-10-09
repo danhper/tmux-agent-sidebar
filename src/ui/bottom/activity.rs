@@ -11,8 +11,15 @@ use crate::ui::text::{display_width, wrap_text_char};
 
 pub(super) fn draw_activity_content(frame: &mut Frame, state: &mut AppState, inner: Rect) {
     let theme = &state.theme;
+    let response = state
+        .focus_state
+        .focused_pane_id
+        .as_deref()
+        .and_then(|id| state.pane_by_id(id))
+        .filter(|pane| pane.prompt_is_response && !pane.prompt.is_empty())
+        .map(|pane| pane.prompt.clone());
 
-    if state.activity.entries.is_empty() {
+    if state.activity.entries.is_empty() && response.is_none() {
         super::render_centered(frame, inner, "No activity yet", theme.text_muted);
         return;
     }
@@ -22,6 +29,19 @@ pub(super) fn draw_activity_content(frame: &mut Frame, state: &mut AppState, inn
 
     // Leave one blank row above the first activity entry for breathing room.
     lines.push(Line::from(""));
+    if let Some(response) = &response {
+        lines.push(Line::from(Span::styled(
+            "Latest response",
+            Style::default().fg(theme.text_muted),
+        )));
+        for line in wrap_text_char(response, inner_w.saturating_sub(2), usize::MAX) {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(theme.text_muted),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
 
     for entry in &state.activity.entries {
         let tool_color = Color::Indexed(entry.tool_color_index());

@@ -971,7 +971,7 @@ fn snapshot_response_japanese_ui() {
     let mut state = make_state_with_groups(vec![make_repo_group("project", vec![pane])]);
 
     let output = render_to_string(&mut state, 30, 27);
-    insta::assert_snapshot!(output, @r"
+    insta::assert_snapshot!(output, @r###"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ                          — ▾
     project
@@ -979,9 +979,11 @@ fn snapshot_response_japanese_ui() {
       ▷ 修 正 が 完 了 し ま し た 。 テ ス ト
         も 全 て 通 っ て い ま す 。
     ╭ Activity │ Git ────────────╮
-    │       No activity yet      │
+    │Latest response             │
+    │  修 正 が 完 了 し ま し た 。 テ ス ト │
+    │  も 全 て 通 っ て い ま す 。       │
     ╰────────────────────────────╯
-    ");
+    "###);
 }
 
 // ─── Three Groups with Focus ─────────────────────────────────────
@@ -1119,7 +1121,7 @@ fn snapshot_response_with_branch_ui() {
     }]);
 
     let output = render_to_string(&mut state, 34, 27);
-    insta::assert_snapshot!(output, @r"
+    insta::assert_snapshot!(output, @r###"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ                              — ▾
     project                          +
@@ -1127,9 +1129,10 @@ fn snapshot_response_with_branch_ui() {
     ┃   feature/ui-v2
       ▷ Done. All tests are green.
     ╭ Activity │ Git ────────────────╮
-    │         No activity yet        │
+    │Latest response                 │
+    │  Done. All tests are green.    │
     ╰────────────────────────────────╯
-    ");
+    "###);
 }
 
 // ─── Multiple Wait Reasons ────────────────────────────────────────

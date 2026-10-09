@@ -6,6 +6,24 @@ use tmux_agent_sidebar::activity::ActivityEntry;
 use tmux_agent_sidebar::state::{BottomTab, Focus};
 use tmux_agent_sidebar::tmux::{AgentType, PaneStatus, SessionInfo, WindowInfo};
 
+#[test]
+fn snapshot_response_preview_has_its_own_color_and_two_lines() {
+    let mut pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    pane.prompt_is_response = true;
+    pane.prompt = "The change is complete. Tests passed, and the full explanation remains available in the activity panel.".into();
+    let mut state = make_state(vec![]);
+    state.repo_groups = vec![make_repo_group("project", vec![pane])];
+    state.bottom_panel_height = 0;
+    insta::assert_snapshot!(render_to_styled_string(&mut state, 28, 10), @r###"
+     ≡[fg:111]1[fg:255]  ●[fg:245]0[fg:245]  ◎[fg:245]0[fg:245]  ◐[fg:245]0[fg:245]  ○[fg:245]1[fg:255]  ✕[fg:245]0[fg:245]
+    ⓘ[fg:221]                        —[fg:252] ▾[fg:252]
+    p[fg:153]r[fg:153]o[fg:153]j[fg:153]e[fg:153]c[fg:153]t[fg:153]
+    ┃[fg:153,bg:239] [bg:239]○[fg:110,bg:239] [fg:174,bg:239]c[fg:174,bg:239]l[fg:174,bg:239]a[fg:174,bg:239]u[fg:174,bg:239]d[fg:174,bg:239]e[fg:174,bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239] [bg:239]
+      ▷[fg:81] [fg:81]T[fg:244]h[fg:244]e[fg:244] [fg:244]c[fg:244]h[fg:244]a[fg:244]n[fg:244]g[fg:244]e[fg:244] [fg:244]i[fg:244]s[fg:244] [fg:244]c[fg:244]o[fg:244]m[fg:244]p[fg:244]l[fg:244]e[fg:244]t[fg:244]e[fg:244].[fg:244] [fg:244]
+       [fg:244] [fg:244]T[fg:244]e[fg:244]s[fg:244]t[fg:244]s[fg:244] [fg:244]p[fg:244]a[fg:244]s[fg:244]s[fg:244]e[fg:244]d[fg:244],[fg:244] [fg:244]a[fg:244]n[fg:244]d[fg:244] [fg:244]t[fg:244]h[fg:244]e[fg:244] [fg:244]f[fg:244]…[fg:244]
+    "###);
+}
+
 // ─── Styled Snapshot Tests for Selection and Focus ─────────────────
 
 #[test]

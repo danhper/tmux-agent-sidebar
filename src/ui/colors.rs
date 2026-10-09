@@ -29,6 +29,7 @@ pub struct ColorTheme {
     pub text_active: Color,
     pub text_muted: Color,
     pub text_inactive: Color,
+    pub response_text: Color,
     pub session_header: Color,
     pub port: Color,
     pub wait_reason: Color,
@@ -70,6 +71,7 @@ impl Default for ColorTheme {
             text_active: Color::Indexed(255),
             text_muted: Color::Indexed(252),
             text_inactive: Color::Indexed(244),
+            response_text: Color::Indexed(244),
             session_header: Color::Indexed(39),
             port: Color::Indexed(246),
             wait_reason: Color::Indexed(221),
@@ -127,6 +129,7 @@ impl ColorTheme {
         theme.text_active = read(tmux::SIDEBAR_COLOR_TEXT_ACTIVE, theme.text_active);
         theme.text_muted = read(tmux::SIDEBAR_COLOR_TEXT_MUTED, theme.text_muted);
         theme.text_inactive = read(tmux::SIDEBAR_COLOR_TEXT_INACTIVE, theme.text_inactive);
+        theme.response_text = read(tmux::SIDEBAR_COLOR_RESPONSE_TEXT, theme.response_text);
         theme.session_header = read(tmux::SIDEBAR_COLOR_SESSION, theme.session_header);
         theme.port = read(tmux::SIDEBAR_COLOR_PORT, theme.port);
         theme.wait_reason = read(tmux::SIDEBAR_COLOR_WAIT_REASON, theme.wait_reason);
@@ -276,6 +279,20 @@ mod tests {
         assert_eq!(theme.accent, Color::Rgb(0x1a, 0x2b, 0x3c));
         assert_eq!(theme.agent_codex, Color::Rgb(0xd0, 0xe7, 0xff));
         assert_eq!(theme.border_inactive, Color::Indexed(42));
+    }
+
+    #[test]
+    fn response_text_color_is_independent_of_inactive_text() {
+        let mut options = std::collections::HashMap::new();
+        options.insert(tmux::SIDEBAR_COLOR_RESPONSE_TEXT.into(), "#444444".into());
+        let theme = ColorTheme::from_options(&options);
+        assert_eq!(theme.response_text, Color::Rgb(68, 68, 68));
+        assert_eq!(theme.text_inactive, Color::Indexed(244));
+        options.insert(tmux::SIDEBAR_COLOR_RESPONSE_TEXT.into(), "#555555".into());
+        assert_eq!(
+            ColorTheme::from_options(&options).response_text,
+            Color::Rgb(85, 85, 85)
+        );
     }
 
     #[test]

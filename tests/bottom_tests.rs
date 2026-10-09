@@ -6,6 +6,50 @@ use tmux_agent_sidebar::activity::ActivityEntry;
 use tmux_agent_sidebar::state::{BottomTab, Focus};
 use tmux_agent_sidebar::tmux::{AgentType, PaneStatus, SessionInfo, WindowInfo};
 
+#[test]
+fn snapshot_full_response_can_be_scrolled_in_activity() {
+    let mut pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    pane.prompt_is_response = true;
+    pane.prompt = format!(
+        "{}Final verification passed.",
+        "Detailed explanation. ".repeat(15)
+    );
+    let mut state = make_state(vec![]);
+    state.repo_groups = vec![make_repo_group("project", vec![pane])];
+    state.bottom_panel_height = 7;
+    let output = render_to_string(&mut state, 30, 16);
+    insta::assert_snapshot!(output, @r###"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                          — ▾
+    project
+    ┃ ○ claude
+      ▷ Detailed explanation. Deta
+        iled explanation. Detaile…
+    ╭ Activity │ Git ────────────╮
+    │Latest response             │
+    │  Detailed explanation. Deta│
+    │  iled explanation. Detailed│
+    │   explanation. Detailed exp│
+    ╰────────────────────────────╯
+    "###);
+    state.activity.scroll.scroll(100);
+    let output = render_to_string(&mut state, 30, 16);
+    insta::assert_snapshot!(output, @r###"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                          — ▾
+    project
+    ┃ ○ claude
+      ▷ Detailed explanation. Deta
+        iled explanation. Detaile…
+    ╭ Activity │ Git ────────────╮
+    │  on. Detailed explanation. │
+    │  Detailed explanation. Deta│
+    │  iled explanation. Final ve│
+    │  rification passed.        │
+    ╰────────────────────────────╯
+    "###);
+}
+
 // ─── Bottom Tab Tests ──────────────────────────────────────────────
 
 #[test]

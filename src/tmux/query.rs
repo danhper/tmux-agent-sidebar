@@ -464,7 +464,12 @@ fn parse_pane_fields_with_processes(
     let prompt_is_response = prompt_source == "response";
 
     // Sanitize prompt: replace pipes/newlines, filter system-injected messages, truncate
-    let prompt = sanitize_prompt(&parts[pane_line_field::PROMPT]);
+    let mut prompt = sanitize_prompt(&parts[pane_line_field::PROMPT]);
+    if prompt_is_response && !prompt.is_empty() {
+        // The row renderer caps its preview; retain the complete response for
+        // the scrollable activity panel.
+        prompt.clone_from(&parts[pane_line_field::PROMPT]);
+    }
 
     let session_id = if parts[pane_line_field::SESSION_ID].is_empty() {
         None
@@ -963,6 +968,19 @@ mod tests {
         let long = "a".repeat(300);
         let result = sanitize_prompt(&long);
         assert_eq!(result.chars().count(), 200);
+    }
+
+    #[test]
+    fn response_keeps_full_text_for_activity_while_user_prompt_stays_bounded() {
+        let long = "Detailed response. ".repeat(30);
+        let mut fields = full_fields();
+        fields[pane_line_field::PROMPT] = &long;
+        fields[pane_line_field::PROMPT_SOURCE] = "response";
+        let pane = parse_pane_fields_with_processes(&field_strings(&fields), None).unwrap();
+        assert_eq!(pane.prompt, long);
+        fields[pane_line_field::PROMPT_SOURCE] = "user";
+        let pane = parse_pane_fields_with_processes(&field_strings(&fields), None).unwrap();
+        assert_eq!(pane.prompt.chars().count(), 200);
     }
 
     #[test]
