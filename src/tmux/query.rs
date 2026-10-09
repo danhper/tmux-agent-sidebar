@@ -5,10 +5,10 @@ use crate::process::{ProcessSnapshot, process_is_agent};
 
 use super::commands::run_tmux;
 use super::options::{
-    PANE_AGENT, PANE_ATTENTION, PANE_BG_CMD, PANE_CWD, PANE_NAME, PANE_PENDING_SESSION_END,
-    PANE_PENDING_WORKTREE_REMOVE, PANE_PERMISSION_MODE, PANE_PROMPT, PANE_PROMPT_SOURCE, PANE_ROLE,
-    PANE_SESSION_ID, PANE_STARTED_AT, PANE_STATUS, PANE_SUBAGENTS, PANE_WAIT_REASON,
-    PANE_WORKTREE_BRANCH, PANE_WORKTREE_NAME, unset_pane_option,
+    PANE_AGENT, PANE_ATTENTION, PANE_BG_CMD, PANE_CODEX_DAEMON, PANE_CWD, PANE_NAME,
+    PANE_PENDING_SESSION_END, PANE_PENDING_WORKTREE_REMOVE, PANE_PERMISSION_MODE, PANE_PROMPT,
+    PANE_PROMPT_SOURCE, PANE_ROLE, PANE_SESSION_ID, PANE_STARTED_AT, PANE_STATUS, PANE_SUBAGENTS,
+    PANE_WAIT_REASON, PANE_WORKTREE_BRANCH, PANE_WORKTREE_NAME, unset_pane_option,
 };
 use super::types::{
     AgentType, PaneInfo, PaneStatus, PermissionMode, SessionInfo, WindowInfo, WorktreeMetadata,
@@ -55,6 +55,8 @@ pub(super) mod pane_line_field {
     pub const WORKTREE_BRANCH: usize = 18; // absolute 24 (@pane_worktree_branch)
     pub const SESSION_ID: usize = 19; // absolute 25 (@pane_session_id)
     pub const SIDEBAR_SPAWNED: usize = 20; // absolute 26 (@agent-sidebar-spawned)
+    pub const PANE_TITLE: usize = 22; // absolute 28 (pane_title)
+    pub const CODEX_DAEMON: usize = 23; // absolute 29 (@pane_codex_daemon)
     pub const BG_CMD: usize = 21; // absolute 27 (@pane_bg_cmd)
     /// Minimum number of fields the pane-line suffix must contain.
     /// Equals `session_line_field::MIN_FIELDS - PANE_LINE_OFFSET`.
@@ -94,6 +96,8 @@ fn pane_format() -> String {
         q(PANE_SESSION_ID),
         q(SPAWNED_OPTION),
         q(PANE_BG_CMD),
+        q("pane_title"),
+        q(PANE_CODEX_DAEMON),
     ]
     .join("|")
 }
@@ -117,6 +121,12 @@ pub fn query_sessions() -> Vec<SessionInfo> {
 
 pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Option<ProcessSnapshot>)
 {
+    query_sessions_with_codex(&crate::codex_daemon::Threads::new())
+}
+
+pub(crate) fn query_sessions_with_codex(
+    threads: &crate::codex_daemon::Threads,
+) -> (Vec<SessionInfo>, Option<ProcessSnapshot>) {
     let pane_format = pane_format();
     let all_panes_output = match run_tmux(&["list-panes", "-a", "-F", &pane_format]) {
         Some(s) => s,
@@ -125,7 +135,7 @@ pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Optio
 
     let process_snapshot = process_snapshot_for_panes(&all_panes_output);
     let (mut sessions_map, process_pids) =
-        build_session_hierarchy(&all_panes_output, process_snapshot.as_ref());
+        build_session_hierarchy_with_codex(&all_panes_output, process_snapshot.as_ref(), threads);
     if !process_pids.is_empty()
         && let Some(snapshot) = &process_snapshot
     {
@@ -138,9 +148,22 @@ pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Optio
 /// hierarchy. Also returns the pid of every pane whose agent infers its
 /// permission mode from process arguments (Codex, Cursor) so the caller can
 /// resolve those modes in a single `ps` pass.
+#[cfg(test)]
 fn build_session_hierarchy(
     all_panes_output: &str,
     process_snapshot: Option<&ProcessSnapshot>,
+) -> (SessionMap, Vec<ProcessPidEntry>) {
+    build_session_hierarchy_with_codex(
+        all_panes_output,
+        process_snapshot,
+        &crate::codex_daemon::Threads::new(),
+    )
+}
+
+fn build_session_hierarchy_with_codex(
+    all_panes_output: &str,
+    process_snapshot: Option<&ProcessSnapshot>,
+    threads: &crate::codex_daemon::Threads,
 ) -> (SessionMap, Vec<ProcessPidEntry>) {
     let mut sessions_map: SessionMap = indexmap::IndexMap::new();
     let mut process_pids: Vec<ProcessPidEntry> = Vec::new();
@@ -183,7 +206,9 @@ fn build_session_hierarchy(
                 panes: Vec::new(),
             });
 
-        if let Some(pane) = parse_pane_fields_with_processes(pane_fields, process_snapshot) {
+        if let Some(pane) = parse_codex_daemon_pane(pane_fields, process_snapshot, threads)
+            .or_else(|| parse_unmapped_pane(pane_fields, process_snapshot, threads))
+        {
             if pane.agent.infers_permission_mode_from_process()
                 && let Some(pid) = pane.pane_pid
             {
@@ -194,6 +219,134 @@ fn build_session_hierarchy(
     }
 
     (sessions_map, process_pids)
+}
+
+fn parse_codex_daemon_pane(
+    fields: &[String],
+    processes: Option<&ProcessSnapshot>,
+    threads: &crate::codex_daemon::Threads,
+) -> Option<PaneInfo> {
+    if fields.get(pane_line_field::PANE_ROLE)?.as_str() == "sidebar" {
+        return None;
+    }
+    let title = fields.get(pane_line_field::PANE_TITLE)?;
+    let thread = crate::codex_daemon::thread_for_title(title, threads)?;
+    let pid = fields.get(pane_line_field::PANE_PID)?.parse().ok()?;
+    if !processes?.tree_has_agent(&[pid], &AgentType::Codex) {
+        return None;
+    }
+    if codex_client_is_embedded(pid, processes?) {
+        return None;
+    }
+    let mut mapped = fields.to_vec();
+    let switched = mapped[pane_line_field::SESSION_ID] != thread.id;
+    mapped[pane_line_field::AGENT] = "codex".into();
+    mapped[pane_line_field::SESSION_ID] = thread.id.clone();
+    mapped[pane_line_field::PANE_CWD] = thread.cwd.clone();
+    if switched {
+        for field in [
+            pane_line_field::PROMPT,
+            pane_line_field::PROMPT_SOURCE,
+            pane_line_field::STARTED_AT,
+            pane_line_field::SUBAGENTS,
+            pane_line_field::WORKTREE_NAME,
+            pane_line_field::WORKTREE_BRANCH,
+            pane_line_field::BG_CMD,
+        ] {
+            mapped[field].clear();
+        }
+        mapped[pane_line_field::PROMPT] = thread.preview.clone();
+    }
+    let mut pane = parse_pane_fields_with_processes(&mapped, processes)?;
+    pane.status = thread.status.clone();
+    pane.wait_reason = thread.wait_reason.clone();
+    pane.attention = pane.status == PaneStatus::Waiting || pane.status == PaneStatus::Error;
+    // Persist the full, uniquely resolved binding for thread-aware hook routing.
+    // Only changed values cause tmux mutations.
+    for (field, key) in [
+        (pane_line_field::AGENT, PANE_AGENT),
+        (pane_line_field::SESSION_ID, PANE_SESSION_ID),
+        (pane_line_field::PANE_CWD, PANE_CWD),
+    ] {
+        if fields[field] != mapped[field] {
+            super::options::set_pane_option(&pane.pane_id, key, &mapped[field]);
+        }
+    }
+    if switched {
+        // Never carry another thread's preview, elapsed time, or tool activity.
+        for key in [
+            PANE_PROMPT,
+            PANE_PROMPT_SOURCE,
+            PANE_STARTED_AT,
+            PANE_BG_CMD,
+            PANE_SUBAGENTS,
+            PANE_WORKTREE_NAME,
+            PANE_WORKTREE_BRANCH,
+        ] {
+            unset_pane_option(&pane.pane_id, key);
+        }
+        let _ = std::fs::remove_file(crate::activity::log_file_path(&pane.pane_id));
+    }
+    if fields
+        .get(pane_line_field::CODEX_DAEMON)
+        .map(String::as_str)
+        != Some("1")
+    {
+        super::options::set_pane_option(&pane.pane_id, PANE_CODEX_DAEMON, "1");
+    }
+    Some(pane)
+}
+
+fn parse_unmapped_pane(
+    fields: &[String],
+    processes: Option<&ProcessSnapshot>,
+    threads: &crate::codex_daemon::Threads,
+) -> Option<PaneInfo> {
+    let mut pane = parse_pane_fields_with_processes(fields, processes)?;
+    if fields
+        .get(pane_line_field::CODEX_DAEMON)
+        .map(String::as_str)
+        != Some("1")
+        || pane
+            .pane_pid
+            .zip(processes)
+            .is_some_and(|(pid, p)| codex_client_is_embedded(pid, p))
+    {
+        return Some(pane);
+    }
+    // Never resurrect the last thread's prompt or status while disconnected,
+    // switching threads, or awaiting a uniquely resolved client identity.
+    pane.status = PaneStatus::Unknown;
+    pane.attention = false;
+    pane.prompt.clear();
+    pane.started_at = None;
+    pane.wait_reason.clear();
+    pane.bg_shell_cmd = None;
+    pane.subagents.clear();
+    pane.worktree = WorktreeMetadata::default();
+    let still_same = threads.is_empty()
+        && pane.session_id.as_ref().is_some_and(|id| {
+            fields
+                .get(pane_line_field::PANE_TITLE)
+                .and_then(|title| crate::codex_daemon::title_thread_prefix(title))
+                .is_some_and(|prefix| id.starts_with(prefix))
+        });
+    if !still_same {
+        pane.session_id = None;
+        pane.path
+            .clone_from(&fields[pane_line_field::PANE_CURRENT_PATH]);
+        if !fields[pane_line_field::SESSION_ID].is_empty() {
+            unset_pane_option(&pane.pane_id, PANE_SESSION_ID);
+        }
+    }
+    Some(pane)
+}
+
+fn codex_client_is_embedded(pid: u32, processes: &ProcessSnapshot) -> bool {
+    processes
+        .command_lines_for_tree(&[pid])
+        .iter()
+        .any(|args| args.split_whitespace().any(|arg| arg == "--no-daemon"))
 }
 
 /// Fan out process-derived permission mode updates (Codex, Cursor) to every
@@ -372,6 +525,7 @@ fn clear_agent_pane_state(pane_id: &str) {
         PANE_WORKTREE_NAME,
         PANE_WORKTREE_BRANCH,
         PANE_SESSION_ID,
+        PANE_CODEX_DAEMON,
         PANE_PENDING_SESSION_END,
         PANE_PENDING_WORKTREE_REMOVE,
         PANE_STARTED_AT,
@@ -474,9 +628,14 @@ fn pane_output_needs_process_snapshot(all_panes_output: &str) -> bool {
             return false;
         }
         let pane_fields = &parts[session_line_field::PANE_LINE_OFFSET..];
-        AgentType::from_label(&pane_fields[pane_line_field::AGENT]).is_some_and(|agent| {
-            agent.swept_on_shell_fallback() || agent.infers_permission_mode_from_process()
-        })
+        pane_fields[pane_line_field::PANE_CURRENT_COMMAND] == "codex"
+            || pane_fields
+                .get(pane_line_field::PANE_TITLE)
+                .and_then(|title| crate::codex_daemon::title_thread_prefix(title))
+                .is_some()
+            || AgentType::from_label(&pane_fields[pane_line_field::AGENT]).is_some_and(|agent| {
+                agent.swept_on_shell_fallback() || agent.infers_permission_mode_from_process()
+            })
     })
 }
 
@@ -1253,6 +1412,7 @@ mod tests {
             PANE_STARTED_AT,
             PANE_CWD,
             PANE_SESSION_ID,
+            PANE_CODEX_DAEMON,
         ] {
             assert!(
                 !test_mock::contains(pane, key),
@@ -1423,5 +1583,86 @@ mod tests {
             Some(0),
             "retained pane should be the zero-pid one"
         );
+    }
+    #[test]
+    fn daemon_mapping_discovers_clients_without_hooks_and_handles_thread_switches() {
+        use crate::codex_daemon::{Thread, Threads};
+        let _guard = super::super::test_mock::install();
+        let first = "019a1234-5678-7123-8123-123456789abc";
+        let second = "019a9999-5678-7123-8123-123456789abc";
+        let threads = Threads::from([
+            (
+                first.into(),
+                Thread {
+                    id: first.into(),
+                    name: Some("First task".into()),
+                    cwd: "/same/repo".into(),
+                    preview: "First prompt".into(),
+                    status: PaneStatus::Running,
+                    wait_reason: String::new(),
+                },
+            ),
+            (
+                second.into(),
+                Thread {
+                    id: second.into(),
+                    name: Some("Second task".into()),
+                    cwd: "/same/repo".into(),
+                    preview: "Second prompt".into(),
+                    status: PaneStatus::Waiting,
+                    wait_reason: "permission".into(),
+                },
+            ),
+        ]);
+        let processes = ProcessSnapshot::from_ps_output(
+            "501 1 fish fish\n502 501 codex codex\n601 1 fish fish\n602 601 codex codex\n701 1 fish fish\n",
+        );
+        let mut fields = vec![String::new(); 24];
+        fields[pane_line_field::PANE_ID] = "%daemon-test-one".into();
+        fields[pane_line_field::PANE_CURRENT_COMMAND] = "codex".into();
+        fields[pane_line_field::PANE_CURRENT_PATH] = "/same/repo".into();
+        fields[pane_line_field::PANE_PID] = "501".into();
+        fields[pane_line_field::PANE_TITLE] = format!("repo | {}...", &first[..29]);
+        let pane = parse_codex_daemon_pane(&fields, Some(&processes), &threads).unwrap();
+        assert_eq!(pane.session_id.as_deref(), Some(first));
+        assert_eq!(pane.status, PaneStatus::Running);
+        assert_eq!(pane.prompt, "First prompt");
+        assert_eq!(pane.agent, AgentType::Codex);
+        assert_eq!(
+            super::super::test_mock::get("%daemon-test-one", PANE_SESSION_ID).as_deref(),
+            Some(first)
+        );
+        fields[pane_line_field::AGENT] = "codex".into();
+        fields[pane_line_field::SESSION_ID] = first.into();
+        fields[pane_line_field::CODEX_DAEMON] = "1".into();
+        fields[pane_line_field::PROMPT] = "Old thread response".into();
+        fields[pane_line_field::STARTED_AT] = "12345".into();
+        let embedded =
+            ProcessSnapshot::from_ps_output("501 1 fish fish\n502 501 codex codex --no-daemon\n");
+        assert!(parse_codex_daemon_pane(&fields, Some(&embedded), &threads).is_none());
+        let embedded_pane = parse_unmapped_pane(&fields, Some(&embedded), &threads).unwrap();
+        assert_eq!(embedded_pane.session_id.as_deref(), Some(first));
+        assert_eq!(embedded_pane.prompt, "Old thread response");
+        assert_eq!(embedded_pane.started_at, Some(12345));
+        fields[pane_line_field::PANE_TITLE] = format!("repo | {}...", &second[..29]);
+        let switched = parse_codex_daemon_pane(&fields, Some(&processes), &threads).unwrap();
+        assert_eq!(switched.session_id.as_deref(), Some(second));
+        assert_eq!(switched.prompt, "Second prompt");
+        assert_eq!(switched.status, PaneStatus::Waiting);
+        assert_eq!(switched.wait_reason, "permission");
+        assert!(switched.started_at.is_none());
+        fields[pane_line_field::PANE_ID] = "%daemon-test-two".into();
+        fields[pane_line_field::PANE_PID] = "601".into();
+        let other = parse_codex_daemon_pane(&fields, Some(&processes), &threads).unwrap();
+        assert_eq!(other.session_id.as_deref(), Some(second));
+        fields[pane_line_field::PANE_PID] = "701".into();
+        assert!(parse_codex_daemon_pane(&fields, Some(&processes), &threads).is_none());
+        fields[pane_line_field::PANE_PID] = "601".into();
+        fields[pane_line_field::PANE_TITLE] = "Starting new thread".into();
+        let unknown = parse_unmapped_pane(&fields, Some(&processes), &threads).unwrap();
+        assert_eq!(unknown.session_id, None);
+        assert_eq!(unknown.status, PaneStatus::Unknown);
+        assert!(unknown.prompt.is_empty());
+        assert!(unknown.started_at.is_none());
     }
 }

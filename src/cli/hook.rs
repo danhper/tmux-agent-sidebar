@@ -1,6 +1,6 @@
 use crate::adapter::cursor::is_cursor_payload;
 use crate::event::{AgentEvent, resolve_adapter};
-use crate::tmux::{CLAUDE_AGENT, CURSOR_AGENT};
+use crate::tmux::{CLAUDE_AGENT, CODEX_AGENT, CURSOR_AGENT};
 
 use super::{read_stdin_json, tmux_pane};
 
@@ -27,7 +27,7 @@ pub(crate) fn cmd_hook(args: &[String]) -> i32 {
     };
 
     let pane = tmux_pane();
-    if pane.is_empty() {
+    if pane.is_empty() && agent_name != CODEX_AGENT {
         return 0;
     }
 
@@ -43,7 +43,129 @@ pub(crate) fn cmd_hook(args: &[String]) -> i32 {
         return 0;
     }
 
-    handle_event(&pane, agent_name, event)
+    if agent_name == CODEX_AGENT {
+        for (index, pane) in codex_hook_panes(&input, &pane).into_iter().enumerate() {
+            handle_event(&pane, agent_name, codex_event_for_pane(&event, index));
+        }
+        0
+    } else {
+        handle_event(&pane, agent_name, event)
+    }
+}
+
+fn codex_event_for_pane(event: &AgentEvent, index: usize) -> AgentEvent {
+    let mut event = event.clone();
+    // Multiple panes can display a thread, but hook stdout must contain only
+    // one protocol response, rather than one JSON object per attached pane.
+    if index > 0
+        && let AgentEvent::Stop { response, .. } = &mut event
+    {
+        *response = None;
+    }
+    event
+}
+
+/// Daemon hooks inherit the daemon's environment, not the attached TUI's.
+/// Route by the full registered thread ID AND the client's current title.
+/// A late event from a previously selected thread cannot replace a new binding.
+fn codex_hook_panes(input: &serde_json::Value, inherited_pane: &str) -> Vec<String> {
+    let Some(session_id) = input
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return Vec::new();
+    };
+    let output = crate::tmux::run_tmux(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{@pane_session_id}\t#{pane_title}\t#{pane_pid}",
+    ])
+    .unwrap_or_default();
+    let processes = crate::process::ProcessSnapshot::scan();
+    let panes = route_codex_hook_panes(
+        &output,
+        processes.as_ref(),
+        session_id,
+        inherited_pane,
+        std::process::id(),
+    );
+    if panes.iter().any(|pane| pane == inherited_pane)
+        && output.lines().any(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            fields.len() == 4
+                && fields[0] == inherited_pane
+                && fields[3].parse().ok().is_some_and(|pid| {
+                    processes
+                        .as_ref()
+                        .is_some_and(|p| p.descendants(&[pid]).contains(&std::process::id()))
+                })
+        })
+    {
+        crate::tmux::unset_pane_option(inherited_pane, crate::tmux::PANE_CODEX_DAEMON);
+    }
+    panes
+}
+
+fn route_codex_hook_panes(
+    output: &str,
+    processes: Option<&crate::process::ProcessSnapshot>,
+    session_id: &str,
+    inherited_pane: &str,
+    hook_pid: u32,
+) -> Vec<String> {
+    let mut panes = Vec::new();
+    for line in output.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 4 {
+            continue;
+        }
+        let Some(pid) = fields[3].parse().ok() else {
+            continue;
+        };
+        let Some(processes) = processes else {
+            continue;
+        };
+        if !processes.tree_has_agent(&[pid], &crate::tmux::AgentType::Codex) {
+            continue;
+        }
+        if processes
+            .command_lines_for_tree(&[pid])
+            .iter()
+            .any(|args| args.split_whitespace().any(|arg| arg == "--no-daemon"))
+            && !processes.descendants(&[pid]).contains(&hook_pid)
+        {
+            continue;
+        }
+        if hook_binding_matches(fields[1], fields[2], session_id) {
+            panes.push(fields[0].to_owned());
+        }
+    }
+    if panes.is_empty() && !inherited_pane.is_empty() {
+        // Embedded/no-daemon hooks run under the client's pane process tree.
+        // A detached shared daemon never passes this ancestry check.
+        let genuine_client_hook = output.lines().any(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            fields.len() == 4
+                && fields[0] == inherited_pane
+                && crate::codex_daemon::title_thread_prefix(fields[2])
+                    .is_none_or(|prefix| session_id.starts_with(prefix))
+                && fields[3].parse().ok().is_some_and(|pid| {
+                    processes.is_some_and(|p| p.descendants(&[pid]).contains(&hook_pid))
+                })
+        });
+        if genuine_client_hook {
+            panes.push(inherited_pane.to_owned());
+        }
+    }
+    panes
+}
+
+fn hook_binding_matches(registered_id: &str, title: &str, hook_id: &str) -> bool {
+    registered_id == hook_id
+        && crate::codex_daemon::title_thread_prefix(title)
+            .is_some_and(|prefix| hook_id.starts_with(prefix))
 }
 
 // ─── event handler ──────────────────────────────────────────────────────────
@@ -231,6 +353,75 @@ fn is_idle_remote_control_start(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn codex_stop_fanout_emits_only_one_hook_response() {
+        let adapter = resolve_adapter("codex").unwrap();
+        let stop = adapter
+            .parse("stop", &json!({"session_id":"thread"}))
+            .unwrap();
+        for index in 0..3 {
+            let AgentEvent::Stop { response, .. } = codex_event_for_pane(&stop, index) else {
+                panic!("expected Stop");
+            };
+            assert_eq!(response.is_some(), index == 0);
+        }
+    }
+
+    #[test]
+    fn daemon_hooks_follow_thread_bindings_instead_of_inherited_pane() {
+        let first = "019a1234-5678-7123-8123-123456789abc";
+        let second = "019a9999-5678-7123-8123-123456789abc";
+        let processes = crate::process::ProcessSnapshot::from_ps_output(
+            "100 1 fish fish\n101 100 codex codex\n200 1 fish fish\n201 200 codex codex\n300 1 fish fish\n400 1 codex codex app-server\n401 400 hook hook\n",
+        );
+        let output = format!(
+            "%1\t{first}\trepo | {}...\t100\n%2\t{second}\trepo | {}...\t200\n%3\t{first}\trepo | {}...\t300\n",
+            &first[..29],
+            &second[..29],
+            &first[..29]
+        );
+        assert_eq!(
+            route_codex_hook_panes(&output, Some(&processes), second, "%1", 401),
+            vec!["%2"]
+        );
+        // A shell retaining an old Codex title must not receive the hook.
+        assert_eq!(
+            route_codex_hook_panes(&output, Some(&processes), first, "%2", 401),
+            vec!["%1"]
+        );
+        let switched = output.replace(
+            &format!("repo | {}...", &first[..29]),
+            &format!("repo | {}...", &second[..29]),
+        );
+        assert_eq!(
+            route_codex_hook_panes(&switched, Some(&processes), first, "%1", 401),
+            Vec::<String>::new()
+        );
+        assert!(route_codex_hook_panes(&output, None, first, "%1", 401).is_empty());
+    }
+
+    #[test]
+    fn embedded_hooks_require_actual_pane_ancestry_for_fallback() {
+        let processes = crate::process::ProcessSnapshot::from_ps_output(
+            "100 1 fish fish\n101 100 codex codex --no-daemon\n102 101 hook hook\n",
+        );
+        let output = "%1\t\tCodex\t100";
+        assert_eq!(
+            route_codex_hook_panes(output, Some(&processes), "new-thread", "%1", 102),
+            vec!["%1"]
+        );
+        assert!(
+            route_codex_hook_panes(output, Some(&processes), "new-thread", "%1", 999).is_empty()
+        );
+        let id = "019a1234-5678-7123-8123-123456789abc";
+        let mapped = format!("%1\t{id}\trepo | {id}\t100");
+        assert!(route_codex_hook_panes(&mapped, Some(&processes), id, "%1", 999).is_empty());
+        assert_eq!(
+            route_codex_hook_panes(&mapped, Some(&processes), id, "%1", 102),
+            vec!["%1"]
+        );
+    }
 
     fn cursor_payload() -> serde_json::Value {
         json!({

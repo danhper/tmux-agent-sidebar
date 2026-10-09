@@ -38,6 +38,7 @@ pub fn run(
         git_rx,
         session_rx,
         version_rx,
+        codex_rx,
         git_tab_active,
     } = workers;
 
@@ -113,6 +114,11 @@ pub fn run(
         if let Ok(names) = session_rx.try_recv() {
             state.sessions.names = names;
             state.sessions.dirty = true;
+            needs_redraw = true;
+        }
+        if let Ok(threads) = codex_rx.try_recv() {
+            state.codex_threads = threads;
+            state.refresh();
             needs_redraw = true;
         }
 

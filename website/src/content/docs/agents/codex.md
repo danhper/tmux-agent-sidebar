@@ -47,3 +47,9 @@ Codex exposes a smaller hook set than Claude Code, so some sidebar features are 
 ## Setup
 
 Wire the hooks from inside a Codex pane — see [Codex setup](/tmux-agent-sidebar/getting-started/codex/).
+
+For shared daemon clients on Linux and macOS, run
+`tmux-agent-sidebar setup codex-daemon` and restart the Codex clients. The sidebar
+then reads titles and running/idle/waiting/error status from the daemon, using
+the thread ID emitted by each terminal client to identify its tmux pane.
+Daemon waiting status distinguishes approvals from requests for user input.

@@ -123,7 +123,8 @@ impl AppState {
     pub fn refresh(&mut self) -> bool {
         self.refresh_now();
         let (focused, window_active, _, _) = tmux::get_sidebar_pane_info(&self.tmux_pane);
-        let (mut sessions, mut process_snapshot) = tmux::query_sessions_with_process_snapshot();
+        let (mut sessions, mut process_snapshot) =
+            tmux::query_sessions_with_codex(&self.codex_threads);
         self.sweep_dead_bg_shells_if_due(&mut sessions, &mut process_snapshot);
         if let Some(process_snapshot) = self.refresh_port_data(&sessions, process_snapshot.as_ref())
         {
@@ -151,7 +152,11 @@ impl AppState {
         for group in &mut self.repo_groups {
             for (pane, _) in &mut group.panes {
                 if let Some(sid) = &pane.session_id
-                    && let Some(name) = self.sessions.names.get(sid)
+                    && let Some(name) = self
+                        .codex_threads
+                        .get(sid)
+                        .and_then(|t| t.name.as_ref())
+                        .or_else(|| self.sessions.names.get(sid))
                 {
                     pane.session_name.clone_from(name);
                 } else {

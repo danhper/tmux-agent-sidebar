@@ -16,6 +16,7 @@ pub(super) struct Workers {
     pub git_rx: Receiver<GitData>,
     pub session_rx: Receiver<HashMap<String, String>>,
     pub version_rx: Receiver<UpdateNotice>,
+    pub codex_rx: Receiver<crate::codex_daemon::Threads>,
     pub git_tab_active: Arc<AtomicBool>,
 }
 
@@ -25,6 +26,7 @@ pub(super) fn spawn(state: &AppState) -> Workers {
     let (git_tx, git_rx) = mpsc::channel::<GitData>();
     let (session_tx, session_rx) = mpsc::channel::<HashMap<String, String>>();
     let (version_tx, version_rx) = mpsc::channel::<UpdateNotice>();
+    let (codex_tx, codex_rx) = mpsc::channel();
     let tmux_pane_clone = state.tmux_pane.clone();
     let git_tab_active = Arc::new(AtomicBool::new(state.bottom_tab == BottomTab::GitStatus));
     let git_tab_flag = Arc::clone(&git_tab_active);
@@ -33,6 +35,9 @@ pub(super) fn spawn(state: &AppState) -> Workers {
     });
     std::thread::spawn(move || {
         session_poll_loop(&session_tx);
+    });
+    std::thread::spawn(move || {
+        codex_poll_loop(&codex_tx);
     });
     std::thread::spawn(move || {
         if let Some(notice) = version::fetch_update_notice() {
@@ -44,7 +49,29 @@ pub(super) fn spawn(state: &AppState) -> Workers {
         git_rx,
         session_rx,
         version_rx,
+        codex_rx,
         git_tab_active,
+    }
+}
+
+fn codex_poll_loop(tx: &mpsc::Sender<crate::codex_daemon::Threads>) {
+    let mut client = None;
+    loop {
+        if client.is_none() {
+            client = crate::codex_daemon::socket_path()
+                .and_then(|path| crate::codex_daemon::Client::connect(&path).ok());
+        }
+        let threads = match client.as_mut().map(|client| client.snapshot()) {
+            Some(Ok(threads)) => threads,
+            _ => {
+                client = None;
+                crate::codex_daemon::Threads::new()
+            }
+        };
+        if tx.send(threads).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(2));
     }
 }
 

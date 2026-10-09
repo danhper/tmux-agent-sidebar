@@ -104,6 +104,7 @@ Per-pane file-based state:
 | `version_notice` | Once at startup (bg fetch) | GitHub release update notice, `None` when up-to-date |
 | `sessions.names` | Every 10s (background thread) | `session_id → title` map; Claude live names and transcript titles plus Codex's session index, scanned by `session_poll_loop` in `app/workers.rs` |
 | `sessions.dirty` | On title map update or tmux snapshot / application tick | Reapplies cached titles to fresh pane objects, then clears the flag |
+| `codex_threads` | Every 2s (background thread) | Read-only metadata for loaded local Codex daemon threads; selected client IDs bind these to tmux panes |
 
 Titles are loaded off-thread immediately at startup and refreshed every 10
 seconds. Session labels use Claude's explicit `custom-title` first, then its generated
@@ -113,6 +114,19 @@ on subsequent polls. Codex labels come from `session_index.jsonl` under
 `CODEX_HOME` (default `~/.codex`); the latest valid `thread_name` for each ID
 wins. Missing titles retain the agent-name fallback. Cursor and OpenCode
 title lookup is not implemented.
+
+Codex daemon metadata is polled off-thread every two seconds through the existing
+local Unix WebSocket control socket. Each tmux snapshot includes `pane_title`;
+with `thread-id` configured as its last Codex title item, it identifies the
+thread selected by that pane's terminal client. Only a unique full ID match among
+loaded daemon threads is accepted, and the pane must still have a live Codex
+client process. The full binding is recorded in `@pane_session_id`, with
+`@pane_codex_daemon` marking daemon-owned metadata. Changing threads clears the
+previous thread's preview, elapsed time, tool activity, and worktree metadata.
+Disconnected or unresolved clients cannot reuse a stale running/waiting status.
+Codex hooks verify both the binding and the current client title before updating
+panes; embedded hooks can use `TMUX_PANE` only when their process actually belongs
+to that pane's process tree.
 
 ---
 

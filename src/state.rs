@@ -126,6 +126,7 @@ pub struct AppState {
     /// triggers title application after a background map update or a fresh
     /// tmux pane snapshot, which contains no resolved session names.
     pub sessions: SessionNamesState,
+    pub(crate) codex_threads: crate::codex_daemon::Threads,
     /// Whether the pet animation is drawn and ticked. Loaded once at startup
     /// from the `@sidebar_pet` tmux option. Defaults to `false`.
     pub pet_enabled: bool,
@@ -175,6 +176,7 @@ impl AppState {
             global: GlobalState::new(),
             bottom_panel_height: crate::ui::BOTTOM_PANEL_HEIGHT,
             sessions: SessionNamesState::new(),
+            codex_threads: crate::codex_daemon::Threads::new(),
             pet_enabled: false,
         };
         crate::state::pet::reseed_pet_idle_motion(&mut state);

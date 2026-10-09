@@ -17,6 +17,9 @@ pub fn run(args: &[String]) -> Option<i32> {
     let cmd = args.first().map(|s| s.as_str())?;
     let rest = &args[1..];
     let code = match cmd {
+        "setup" if rest.first().is_some_and(|s| s == "codex-daemon") => {
+            crate::codex_daemon::setup()
+        }
         "setup" => setup::cmd_setup(rest),
         "hook" => hook::cmd_hook(rest),
         "toggle" => toggle::cmd_toggle(rest),

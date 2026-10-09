@@ -63,6 +63,8 @@ pub const PANE_ROLE: &str = "@pane_role";
 /// Agent-provided session id, surfaced in the status line for
 /// quick reference.
 pub const PANE_SESSION_ID: &str = "@pane_session_id";
+/// Marks a daemon binding owned by the pane's Codex terminal client.
+pub const PANE_CODEX_DAEMON: &str = "@pane_codex_daemon";
 /// Epoch-seconds timestamp of the current run's start — drives
 /// the "running for Xs" label.
 pub const PANE_STARTED_AT: &str = "@pane_started_at";
