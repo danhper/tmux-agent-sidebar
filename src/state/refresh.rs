@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::activity::{self, TaskProgress};
@@ -57,34 +57,10 @@ impl AppState {
         sessions: Vec<SessionInfo>,
     ) {
         self.focus_state.sidebar_focused = sidebar_focused;
-        // Capture the prior `pane_id → session_id` map so we can detect
-        // anything that should re-trigger `refresh_session_names`:
-        //   - a brand-new pane_id (first appearance)
-        //   - an existing pane whose session_id changed (e.g. /clear or
-        //     a Codex session swap reuses the same pane_id but binds a
-        //     new session label)
-        let prev_session_ids: HashMap<String, Option<String>> = self
-            .repo_groups
-            .iter()
-            .flat_map(|g| {
-                g.panes
-                    .iter()
-                    .map(|(p, _)| (p.pane_id.clone(), p.session_id.clone()))
-            })
-            .collect();
         self.repo_groups = crate::group::group_panes_by_repo(&sessions);
-        if !self.sessions.dirty
-            && self
-                .repo_groups
-                .iter()
-                .flat_map(|g| g.panes.iter())
-                .any(|(p, _)| match prev_session_ids.get(&p.pane_id) {
-                    None => true,
-                    Some(prev_sid) => *prev_sid != p.session_id,
-                })
-        {
-            self.sessions.dirty = true;
-        }
+        // Fresh tmux snapshots contain no resolved session names. Reapply the
+        // cached titles even when every pane and session ID is unchanged.
+        self.sessions.dirty = true;
         self.prune_pane_states_to_current_panes();
         self.rebuild_row_targets();
         self.find_focused_pane();
@@ -168,8 +144,8 @@ impl AppState {
     }
 
     /// Apply the current `session_id → name` map to each pane so the
-    /// sidebar can render `/rename`-assigned labels. The map itself is
-    /// refreshed off-thread by `session_poll_loop` in `main.rs`; this
+    /// sidebar can render persisted thread titles. The map itself is
+    /// refreshed off-thread by `session_poll_loop` in `app/workers.rs`; this
     /// function only consumes the cached snapshot.
     fn refresh_session_names(&mut self) {
         for group in &mut self.repo_groups {
@@ -904,19 +880,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_session_snapshot_does_not_mark_dirty_when_session_ids_unchanged() {
-        // Same pane, same session_id across snapshots — no need to
-        // re-walk every pane, dirty flag should stay clear.
+    fn apply_session_snapshot_reapplies_titles_when_session_ids_unchanged() {
         let mut state = state_with_panes(vec![pane_with_session("%1", "sess-a")]);
+        state
+            .sessions
+            .names
+            .insert("sess-a".into(), "Fix parser".into());
+        state.refresh_session_names();
         state.sessions.dirty = false;
 
-        let next_sessions = test_session(vec![pane_with_session("%1", "sess-a")]);
-        state.apply_session_snapshot(false, next_sessions);
-
-        assert!(
-            !state.sessions.dirty,
-            "session_names_dirty must remain clear when nothing changed"
-        );
+        // tmux returns fresh pane objects with empty session_name fields.
+        // Titles must survive repeated snapshots between background polls.
+        for _ in 0..3 {
+            let next_sessions = test_session(vec![pane_with_session("%1", "sess-a")]);
+            state.apply_session_snapshot(false, next_sessions);
+            if state.sessions.dirty {
+                state.refresh_session_names();
+                state.sessions.dirty = false;
+            }
+            assert_eq!(state.repo_groups[0].panes[0].0.session_name, "Fix parser");
+        }
     }
 
     #[test]

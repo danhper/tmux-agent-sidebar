@@ -102,8 +102,17 @@ Per-pane file-based state:
 | `tmux_pane` | Once at startup | This sidebar's own tmux pane ID |
 | `pane_states.seen` | Every 1s | Set of pane IDs that have been seen as agents (bundled with `pane_states.map` under the `PaneRuntimeMap` wrapper) |
 | `version_notice` | Once at startup (bg fetch) | GitHub release update notice, `None` when up-to-date |
-| `sessions.names` | Every 10s (background thread) | `session_id → session name` map; scanned by `session_poll_loop` in `app/workers.rs` so the TUI thread never blocks on filesystem I/O |
-| `sessions.dirty` | On session map refresh / application tick | Marks the session map as changed so the per-pane session label walk only runs when needed |
+| `sessions.names` | Every 10s (background thread) | `session_id → title` map; Claude live names and transcript titles plus Codex's session index, scanned by `session_poll_loop` in `app/workers.rs` |
+| `sessions.dirty` | On title map update or tmux snapshot / application tick | Reapplies cached titles to fresh pane objects, then clears the flag |
+
+Titles are loaded off-thread immediately at startup and refreshed every 10
+seconds. Session labels use Claude's explicit `custom-title` first, then its generated
+`ai-title`, then the live-session `name`. Only transcripts for IDs present in
+`~/.claude/sessions/*.json` are read, with appended records read incrementally
+on subsequent polls. Codex labels come from `session_index.jsonl` under
+`CODEX_HOME` (default `~/.codex`); the latest valid `thread_name` for each ID
+wins. Missing titles retain the agent-name fallback. Cursor and OpenCode
+title lookup is not implemented.
 
 ---
 

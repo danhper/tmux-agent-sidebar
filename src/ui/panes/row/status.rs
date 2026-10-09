@@ -38,7 +38,7 @@ pub(super) fn status_row(
 
     let badge_extra = if badge.is_empty() { 0 } else { 1 };
     let fixed_width = display_width(icon) + 1 + badge_extra + display_width(badge);
-    // User-supplied session names (set via `/rename`) can be arbitrarily
+    // Persisted titles (including names set via `/rename`) can be arbitrarily
     // long; cap the title to the space left after reserving room for the
     // icon, badge, and elapsed label so they stay visible instead of
     // being pushed off-screen.
