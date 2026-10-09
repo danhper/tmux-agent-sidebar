@@ -39,7 +39,7 @@ pub(crate) fn cmd_hook(args: &[String]) -> i32 {
         return 0;
     };
     let environment_kind = std::env::var(CLAUDE_ENVIRONMENT_KIND_ENV).ok();
-    if is_idle_remote_control_start(agent_name, &event, environment_kind.as_deref()) {
+    if is_remote_control_event(agent_name, &event, environment_kind.as_deref()) {
         return 0;
     }
 
@@ -333,20 +333,15 @@ fn is_replayed_cursor_payload(agent_name: &str, input: &serde_json::Value) -> bo
 /// (`claude rc`); hooks inherit it from the spawned session.
 const CLAUDE_ENVIRONMENT_KIND_ENV: &str = "CLAUDE_CODE_ENVIRONMENT_KIND";
 
-/// `claude rc` pre-spawns an idle `claude --print --sdk-url ...` session
-/// per pane so claude.ai/code can attach to it instantly, and that child
-/// fires `SessionStart`. Registering the pane on it would list a bare
-/// `claude rc` as an agent. Drop only the `SessionStart`: once someone
-/// actually drives the session remotely, `UserPromptSubmit` / `Stop` /
-/// `Notification` call `set_agent_meta` and the pane shows up as usual.
-fn is_idle_remote_control_start(
+/// Sessions launched through `claude rc` are controlled remotely, so their
+/// launcher pane cannot be used as an interactive session. Ignore all bridge
+/// hooks, including prompts and stops, so active remote work stays hidden.
+fn is_remote_control_event(
     agent_name: &str,
-    event: &AgentEvent,
+    _event: &AgentEvent,
     environment_kind: Option<&str>,
 ) -> bool {
-    agent_name == CLAUDE_AGENT
-        && environment_kind == Some("bridge")
-        && matches!(event, AgentEvent::SessionStart { .. })
+    agent_name == CLAUDE_AGENT && environment_kind == Some("bridge")
 }
 
 #[cfg(test)]
@@ -459,37 +454,23 @@ mod tests {
     #[test]
     fn remote_control_session_start_is_dropped() {
         let start = claude_event("session-start");
-        assert!(is_idle_remote_control_start(
-            "claude",
-            &start,
-            Some("bridge")
-        ));
+        assert!(is_remote_control_event("claude", &start, Some("bridge")));
     }
 
     #[test]
-    fn remote_control_prompt_is_kept() {
+    fn remote_control_prompt_and_stop_are_dropped() {
         let prompt = claude_event("user-prompt-submit");
-        assert!(!is_idle_remote_control_start(
-            "claude",
-            &prompt,
-            Some("bridge")
-        ));
+        assert!(is_remote_control_event("claude", &prompt, Some("bridge")));
+        let stop = claude_event("stop");
+        assert!(is_remote_control_event("claude", &stop, Some("bridge")));
     }
 
     #[test]
     fn local_claude_session_start_is_kept() {
         let start = claude_event("session-start");
-        assert!(!is_idle_remote_control_start("claude", &start, None));
-        assert!(!is_idle_remote_control_start(
-            "claude",
-            &start,
-            Some("local")
-        ));
-        assert!(!is_idle_remote_control_start(
-            "codex",
-            &start,
-            Some("bridge")
-        ));
+        assert!(!is_remote_control_event("claude", &start, None));
+        assert!(!is_remote_control_event("claude", &start, Some("local")));
+        assert!(!is_remote_control_event("codex", &start, Some("bridge")));
     }
 
     #[test]

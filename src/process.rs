@@ -97,6 +97,32 @@ impl ProcessSnapshot {
         })
     }
 
+    pub(crate) fn tree_has_claude_remote_control(&self, seed_pids: &[u32]) -> bool {
+        let mut queue: VecDeque<u32> = seed_pids.iter().copied().collect();
+        let mut seen = HashSet::new();
+        while let Some(pid) = queue.pop_front() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            if let Some(info) = self.info_by_pid.get(&pid)
+                && process_is_agent(info, &AgentType::Claude)
+            {
+                let mut args = info.args.split_whitespace();
+                args.next();
+                if matches!(args.next(), Some("rc" | "remote-control")) {
+                    return true;
+                }
+                // A real interactive Claude client owns this branch. Its
+                // tool-spawned children do not make the pane an RC launcher.
+                continue;
+            }
+            if let Some(children) = self.children_of.get(&pid) {
+                queue.extend(children.iter().copied());
+            }
+        }
+        false
+    }
+
     pub(crate) fn command_lines_for_tree(&self, seed_pids: &[u32]) -> Vec<String> {
         self.descendants(seed_pids)
             .into_iter()
@@ -142,6 +168,21 @@ pub(crate) fn process_matches_agent(info: &ProcessInfo, agent_name: &str) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_control_launcher_is_detected_through_shell_wrappers() {
+        for subcommand in ["rc", "remote-control"] {
+            let snapshot = ProcessSnapshot::from_ps_output(&format!(
+                "100 1 fish fish\n101 100 claude /opt/homebrew/bin/claude {subcommand}\n102 101 claude claude --print --sdk-url https://example.test\n"
+            ));
+            assert!(snapshot.tree_has_claude_remote_control(&[100]));
+            assert!(!snapshot.tree_has_claude_remote_control(&[102]));
+        }
+        let normal = ProcessSnapshot::from_ps_output(
+            "100 1 fish fish\n101 100 claude /opt/homebrew/bin/claude --resume thread\n102 101 claude claude rc\n",
+        );
+        assert!(!normal.tree_has_claude_remote_control(&[100]));
+    }
 
     #[test]
     fn descendants_walks_process_tree() {

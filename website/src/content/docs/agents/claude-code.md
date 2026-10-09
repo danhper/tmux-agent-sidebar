@@ -5,6 +5,10 @@ description: Every sidebar feature that lights up with Claude Code hooks.
 
 Claude Code is the reference agent for the sidebar — every feature is wired through a Claude hook.
 
+Sessions launched by `claude rc` / `claude remote-control` are hidden, including
+active remote sessions, because their launcher pane is not an interactive
+conversation. Regular interactive Claude sessions remain visible.
+
 ## What you get
 
 ### Status and prompts

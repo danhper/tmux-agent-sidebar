@@ -420,6 +420,16 @@ fn parse_pane_fields_with_processes(
     let agent = AgentType::from_label(&parts[pane_line_field::AGENT])?;
     let current_command = parts[pane_line_field::PANE_CURRENT_COMMAND].as_str();
     let pane_pid: Option<u32> = parts[pane_line_field::PANE_PID].parse().ok();
+    if agent == AgentType::Claude
+        && pane_pid
+            .zip(process_snapshot)
+            .is_some_and(|(pid, snapshot)| snapshot.tree_has_claude_remote_control(&[pid]))
+    {
+        // Clear hook metadata already written by older versions, so the
+        // hidden remote session cannot reappear after the launcher exits.
+        clear_agent_pane_state(&parts[pane_line_field::PANE_ID]);
+        return None;
+    }
 
     // Codex / OpenCode / Cursor panes can leave stale tmux metadata behind
     // after the agent exits and the pane falls back to the user's shell.
@@ -639,7 +649,9 @@ fn pane_output_needs_process_snapshot(all_panes_output: &str) -> bool {
                 .and_then(|title| crate::codex_daemon::title_thread_prefix(title))
                 .is_some()
             || AgentType::from_label(&pane_fields[pane_line_field::AGENT]).is_some_and(|agent| {
-                agent.swept_on_shell_fallback() || agent.infers_permission_mode_from_process()
+                agent == AgentType::Claude
+                    || agent.swept_on_shell_fallback()
+                    || agent.infers_permission_mode_from_process()
             })
     })
 }
@@ -1347,6 +1359,30 @@ mod tests {
             Some("keep me"),
             "live Codex panes must not be swept just because tmux reports a shell"
         );
+    }
+
+    #[test]
+    fn active_remote_control_pane_is_hidden_and_old_metadata_is_cleared() {
+        let _guard = test_mock::install();
+        let pane = "%RC_HIDDEN";
+        test_mock::set(pane, PANE_AGENT, "claude");
+        test_mock::set(pane, PANE_SESSION_ID, "bridge-session");
+        test_mock::set(pane, PANE_PROMPT, "Remote work completed");
+        let mut fields = full_fields();
+        fields[pane_line_field::PANE_ID] = pane;
+        fields[pane_line_field::AGENT] = "claude";
+        fields[pane_line_field::PANE_CURRENT_COMMAND] = "claude";
+        fields[pane_line_field::PANE_PID] = "100";
+        let fields = field_strings(&fields);
+        let remote = process_snapshot(
+            "100 1 fish fish\n101 100 claude claude rc\n102 101 claude claude --print --sdk-url https://example.test\n",
+        );
+        assert!(parse_pane_fields_with_processes(&fields, Some(&remote)).is_none());
+        assert!(!test_mock::contains(pane, PANE_AGENT));
+        assert!(!test_mock::contains(pane, PANE_SESSION_ID));
+        let interactive =
+            process_snapshot("100 1 fish fish\n101 100 claude claude --resume thread\n");
+        assert!(parse_pane_fields_with_processes(&fields, Some(&interactive)).is_some());
     }
 
     #[test]
